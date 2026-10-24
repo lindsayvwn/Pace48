@@ -252,9 +252,31 @@ with tab1:
     m2.metric("Total miles", f"{hikes['distance_mi'].sum():,.0f}")
     m3.metric("Total climb (ft)", f"{hikes['ascent_ft'].sum():,.0f}")
     m4.metric("Total hours", f"{hikes['time_hr'].sum():,.0f}")
-    if hikes["ascent_ft"].isna().any():
-        st.warning(f"{int(hikes['ascent_ft'].isna().sum())} used activities have no climb data, so they're left out of "
-                   "the model. Upload their .zip files to fill it in.")
+    # Which used activities have real data, and which still need a matching .fit/.zip?
+    def _summary(df: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame({
+            "Date": df["date"], "Activity": df["title"],
+            "NH 4000 peaks": df["peaks"].map(lambda ps: ", ".join(ps)),
+            "Miles": df["distance_mi"],
+        })
+
+    has_climb = hikes["ascent_ft"].notna()
+    ok_col, missing_col = st.columns(2)
+    with ok_col:
+        st.markdown(f"**✅ With climb data ({int(has_climb.sum())})**")
+        st.caption("Used by the model.")
+        st.dataframe(_summary(hikes[has_climb]), hide_index=True, width="stretch", height=260,
+                     column_config={"Date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
+                                    "Miles": st.column_config.NumberColumn("Miles", format="%.1f")})
+    with missing_col:
+        st.markdown(f"**⚠️ No match / no climb data ({int((~has_climb).sum())})**")
+        st.caption("Left out of the model. Upload each one's .zip (step ②) to fill it in, or untick *Use* above.")
+        if (~has_climb).any():
+            st.dataframe(_summary(hikes[~has_climb]), hide_index=True, width="stretch", height=260,
+                         column_config={"Date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
+                                        "Miles": st.column_config.NumberColumn("Miles", format="%.1f")})
+        else:
+            st.success("Every activity you're using has climb data.")
 
     st.download_button(
         "💾 Save my peak tags & exclusions", data=tags_to_csv(tags), file_name="my_nh4000_tags.csv", mime="text/csv",
