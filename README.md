@@ -6,11 +6,13 @@ A Streamlit app that learns **your** hiking pace from Garmin files and predicts 
 **Live app:** _(paste your Streamlit Community Cloud URL here)_
 
 ## How it works
-1. **Upload** Garmin data: `.fit` files, a `.zip` of them, or Garmin Connect's `Activities.csv`.
-2. **Tag** which hikes were NH 4000-footers (auto-suggested from the activity title).
-3. **Explore** columns with line / scatter / histogram charts.
-4. **Model**: pick two inputs + a target, fit a linear regression, type values, get a prediction.
-5. **Predict a peak**: the default model is `distance_mi + ascent_ft → time_hr`, applied to each peak's reference route.
+1. **Upload** your Garmin `Activities.csv` (required: supplies activity titles) plus the `.zip`/`.fit` files for your hikes
+   (recommended: Garmin's CSV often leaves climb blank). Rows are matched by start time.
+2. **Tag & exclude**: untick *Use* to leave an activity out; pick NH 4000 peaks (auto-suggested from titles).
+3. **Save your tags** (download button) and upload that file next visit so you don't have to re-tag.
+4. **Explore** columns with line / scatter / histogram charts.
+5. **Model**: pick two inputs + a target, fit a linear regression, type values, get a prediction.
+6. **Predict a peak**: the default model is `distance_mi + ascent_ft → time_hr`, applied to each peak's reference route.
 
 With fewer than 5 hikes the app falls back to the Naismith rule scaled to your pace and says so on screen.
 
@@ -35,4 +37,4 @@ Push this folder to a **public** GitHub repo, go to https://share.streamlit.io, 
 branch `main`, main file `app.py`, then Deploy.
 
 ## Files
-`app.py` UI · `garmin_io.py` .fit/CSV parsing + cleaning · `model.py` features, regression, fallback
+`app.py` UI · `garmin_io.py` .fit/CSV parsing, matching, cleaning · `tags_io.py` save/restore tags · `model.py` features, regression, fallback

@@ -13,7 +13,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from garmin_io import hikes_only, load_uploads
+from garmin_io import activity_key, load_activities
+from tags_io import tags_from_csv, tags_to_csv
 from model import FEATURES, MIN_HIKES_FOR_REGRESSION, TARGET, PaceModel, fit_regression, predict
 
 HERE = Path(__file__).parent
@@ -57,11 +58,19 @@ st.info(
 
 # ----------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.header("1 · Your data")
-    uploads = st.file_uploader(
-        "Upload Garmin files", type=["fit", "zip", "csv"], accept_multiple_files=True,
-        help="Any mix of: .fit files (one per activity), a .zip of .fit files, "
-             "or the Activities.csv from Garmin Connect.",
+    st.header("Your data")
+    csv_up = st.file_uploader(
+        "① Activities.csv (required)", type=["csv"],
+        help="Garmin Connect → Activities → Export CSV. It supplies your activity titles.",
+    )
+    fit_ups = st.file_uploader(
+        "② Activity .zip / .fit files (recommended)", type=["zip", "fit"], accept_multiple_files=True,
+        help="Garmin's CSV often leaves climb blank. The .fit files carry the real distance, climb and time, "
+             "and are matched to the CSV by start time.",
+    )
+    tags_up = st.file_uploader(
+        "③ Saved peak tags (optional)", type=["csv"],
+        help="The file you downloaded from this app last time. It restores your NH 4000 tags and exclusions.",
     )
     use_demo = st.checkbox("No Garmin data? Use synthetic demo data", value=False)
     c1, c2 = st.columns(2)
@@ -69,14 +78,13 @@ with st.sidebar:
     elev_unit = c2.radio("CSV elevation", ["ft", "m"], horizontal=True)
     with st.expander("How do I get my files from Garmin?"):
         st.markdown(
-            "**One hike (.fit):** garminconnect.com → open the activity → ⚙️ → *Export Original*. "
-            "You get a .zip containing a .fit — upload the zip as-is.\n\n"
-            "**Many activities (CSV):** Garmin Connect → Activities → *Export CSV*.\n\n"
-            "**Everything:** Garmin account → *Data Management* → *Export Your Data* (a big zip)."
+            "**Activities.csv:** Garmin Connect → Activities → scroll to load the activities you want → *Export CSV*.\n\n"
+            "**Each hike (.zip):** open the activity → ⚙️ → *Export Original*. Upload the .zip as-is; you can select many at once.\n\n"
+            "**Everything at once:** Garmin account → *Data Management* → *Export Your Data* (a big zip of .fit files)."
         )
     st.caption(
         "🔒 Files are read in memory for this session only. From .fit files the app keeps just distance, "
-        "climb, time, date and heart-rate summaries — **no GPS, name or weight**. Nothing is saved on a server."
+        "climb, time, date and heart-rate summaries: **no GPS, name or weight**. Nothing is saved on a server."
     )
     st.caption(
         "Why no Garmin login? Garmin only allows account connections for approved companies, and asking for "
@@ -85,74 +93,112 @@ with st.sidebar:
     )
 
 # ------------------------------------------------------------- load data
-files = [(f.name, f.getvalue()) for f in (uploads or [])]
-if use_demo:
-    files.append((DEMO_CSV.name, DEMO_CSV.read_bytes()))
+csv_bytes = csv_up.getvalue() if csv_up else (DEMO_CSV.read_bytes() if use_demo else None)
+fit_files = [(f.name, f.getvalue()) for f in (fit_ups or [])]
 
-
-@st.cache_data(show_spinner="Reading Garmin files…")
-def _load(file_tuple, du, eu):
-    return load_uploads(list(file_tuple), du, eu)
-
-
-if not files:
-    st.markdown("### 👈 Start by uploading a Garmin file (or tick the demo-data box)")
+if csv_bytes is None:
+    st.markdown("### 👈 Start by uploading your Garmin Activities.csv")
     st.markdown(
-        "1. Upload hikes from Garmin  \n2. Tag which ones were NH 4000-footers  \n"
-        "3. Explore your pace, then get a predicted time for any peak"
+        "1. Upload **Activities.csv** (your titles) and the **.zip** files for the hikes you want (real climb and time)  \n"
+        "2. Tag which ones were NH 4000-footers, and untick any you want to leave out  \n"
+        "3. Explore your pace, then get a predicted time for any peak  \n"
+        "4. **Download your tags** so next time you can upload them instead of starting over"
     )
     with st.expander("Preview the 48 NH 4000-footers reference list"):
         st.dataframe(PEAKS, hide_index=True, width="stretch")
     st.stop()
 
-activities, notes = _load(tuple(files), dist_unit, elev_unit)
+
+@st.cache_data(show_spinner="Reading Garmin files…")
+def _load(csv_b, fit_tuple, du, eu):
+    return load_activities(csv_b, list(fit_tuple), du, eu)
+
+
+try:
+    activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit)
+except ValueError as e:
+    st.error(str(e))
+    st.stop()
 for n in notes:
     st.warning(n)
 if activities.empty:
     st.error("I couldn't find any activities in those files.")
     st.stop()
 
+# match summary
+counts = activities["match"].value_counts()
+if fit_files:
+    st.caption(
+        f"Cross-referenced with your .fit files: **{counts.get('matched', 0)} matched**"
+        + (f" · {counts.get('fit only', 0)} .fit file(s) with no CSV row (named by filename)" if counts.get("fit only", 0) else "")
+        + (f" · {counts.get('csv only', 0)} CSV rows with no .fit file (climb may be missing)" if counts.get("csv only", 0) else "")
+    )
+else:
+    st.warning("No .fit/.zip files uploaded: using the CSV's own numbers, and Garmin often leaves climb blank there. "
+               "Upload the .zip files for best results.")
+
 types = sorted(activities["activity_type"].unique())
 default_types = [t for t in types if "hik" in t.lower()] or types
 chosen_types = st.sidebar.multiselect(
-    "Activity types to use", types, default=default_types,
+    "Activity types to show", types, default=default_types,
     help="Hiking is the default. Running pace is usually much faster than hiking pace, "
          "so mixing types can make predictions too optimistic.",
 )
-hikes = activities[activities["activity_type"].isin(chosen_types)].reset_index(drop=True)
-if hikes.empty:
+all_rows = activities[activities["activity_type"].isin(chosen_types)].reset_index(drop=True)
+if all_rows.empty:
     st.error("No activities of the selected types.")
     st.stop()
 if not all("hik" in t.lower() for t in chosen_types):
     st.sidebar.warning("Non-hiking activities selected: predictions may be too optimistic.")
 
-# --------------------------------------------------------- peak tagging
-data_key = f"{len(hikes)}-{hikes['distance_mi'].round(2).sum():.2f}"
-hikes = hikes.assign(peaks=[suggest_peaks(t) for t in hikes["title"]])
+# --------------------------------------------------------- tags that survive new uploads
+# st.session_state["tags"] maps activity key -> {"peaks": [...], "include": bool, ...}.
+# The key is the activity's start time, so it stays valid when you add more files later.
+tags: dict = st.session_state.setdefault("tags", {})
+if tags_up is not None:
+    sig = (tags_up.name, tags_up.size)
+    if st.session_state.get("tags_sig") != sig:  # apply each saved file once, not on every rerun
+        try:
+            tags.update(tags_from_csv(tags_up.getvalue()))
+            st.session_state["tags_sig"] = sig
+            st.session_state["tags_version"] = st.session_state.get("tags_version", 0) + 1
+        except Exception as e:
+            st.sidebar.error(f"Couldn't read the saved tags file: {e}")
+            st.session_state["tags_sig"] = sig
+
+all_rows["key"] = [activity_key(a, d, m) for a, d, m in zip(all_rows["start_local"], all_rows["date"], all_rows["distance_mi"])]
+for _, r in all_rows.iterrows():
+    entry = tags.setdefault(r["key"], {"peaks": suggest_peaks(r["title"]), "include": True})
+    entry.update(date=f"{r['date']:%Y-%m-%d}" if pd.notna(r["date"]) else "", title=r["title"],
+                 distance_mi=round(float(r["distance_mi"]), 2) if pd.notna(r["distance_mi"]) else "")
 
 tab1, tab2, tab3, tab4 = st.tabs(
-    ["① Preview & tag peaks", "② Explore", "③ Build a model", "④ Predict an NH 4000-footer"]
+    ["① Preview, tag & exclude", "② Explore", "③ Build a model", "④ Predict an NH 4000-footer"]
 )
 
 # ============================================================ TAB 1
 with tab1:
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Activities", len(hikes))
-    m2.metric("Total miles", f"{hikes['distance_mi'].sum():,.0f}")
-    m3.metric("Total climb (ft)", f"{hikes['ascent_ft'].sum():,.0f}")
-    m4.metric("Total hours", f"{hikes['time_hr'].sum():,.0f}")
+    # Base table is rebuilt only when the data/tags change, so edits made in the grid aren't reset.
+    editor_key = f"editor-{hash(tuple(all_rows['key']))}-{st.session_state.get('tags_version', 0)}"
+    base_key = f"base-{editor_key}"
+    if base_key not in st.session_state:
+        st.session_state[base_key] = pd.DataFrame({
+            "include": [tags[k]["include"] for k in all_rows["key"]],
+            "date": all_rows["date"], "title": all_rows["title"], "activity_type": all_rows["activity_type"],
+            "distance_mi": all_rows["distance_mi"], "ascent_ft": all_rows["ascent_ft"],
+            "time_hr": all_rows["time_hr"], "avg_hr": all_rows["avg_hr"],
+            "nh4000": [tags[k]["peaks"] for k in all_rows["key"]],
+        })
     st.markdown(
-        "**Was any of these a NH 4000-footer?** Pick the peak(s) in the *NH 4000 peaks* column "
-        "(some are pre-filled from the title). It's optional for the model, but lets the predictor compare "
-        "against your real times."
+        "**Tick the activities to use, and tag any NH 4000-footers.** Untick *Use* to leave an activity out of every "
+        "chart and model. Pick peak(s) in the *NH 4000 peaks* column (some are pre-filled from the title)."
     )
-    show_cols = ["date", "title", "activity_type", "distance_mi", "ascent_ft", "time_hr", "avg_hr", "peaks"]
     edited = st.data_editor(
-        hikes[show_cols].rename(columns={"peaks": "nh4000"}),
-        key=f"editor-{data_key}",
-        hide_index=True, width="stretch",
-        disabled=[c for c in show_cols if c != "peaks"],
+        st.session_state[base_key],
+        key=editor_key, hide_index=True, width="stretch",
+        disabled=["date", "title", "activity_type", "distance_mi", "ascent_ft", "time_hr", "avg_hr"],
         column_config={
+            "include": st.column_config.CheckboxColumn("Use", default=True),
             "date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
             "title": "Title", "activity_type": "Type",
             "distance_mi": st.column_config.NumberColumn("Miles", format="%.1f"),
@@ -162,7 +208,32 @@ with tab1:
             "nh4000": st.column_config.MultiselectColumn("NH 4000 peaks", options=list(PEAKS["peak"])),
         },
     )
-    hikes["peaks"] = edited["nh4000"].apply(lambda v: list(v) if isinstance(v, (list, tuple, np.ndarray)) else []).values
+    # write edits back into the persistent store
+    clean_peaks = edited["nh4000"].apply(lambda v: list(v) if isinstance(v, (list, tuple, np.ndarray)) else [])
+    for k, inc, pk in zip(all_rows["key"], edited["include"].fillna(True), clean_peaks):
+        tags[k]["include"], tags[k]["peaks"] = bool(inc), pk
+    all_rows["peaks"] = clean_peaks.values
+    all_rows["include"] = edited["include"].fillna(True).astype(bool).values
+    hikes = all_rows[all_rows["include"]].reset_index(drop=True)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Activities used", f"{len(hikes)} of {len(all_rows)}")
+    m2.metric("Total miles", f"{hikes['distance_mi'].sum():,.0f}")
+    m3.metric("Total climb (ft)", f"{hikes['ascent_ft'].sum():,.0f}")
+    m4.metric("Total hours", f"{hikes['time_hr'].sum():,.0f}")
+    if hikes["ascent_ft"].isna().any():
+        st.warning(f"{int(hikes['ascent_ft'].isna().sum())} used activities have no climb data, so they're left out of "
+                   "the model. Upload their .zip files to fill it in.")
+
+    st.download_button(
+        "💾 Save my peak tags & exclusions", data=tags_to_csv(tags), file_name="my_nh4000_tags.csv", mime="text/csv",
+        help="Next visit, upload this file in the sidebar (step ③) and your tags come right back.",
+    )
+    st.caption("Tip: this app can't remember you between visits, so download this file when you're done tagging.")
+
+if hikes.empty:
+    st.info("Every activity is unticked. Tick at least one in the table above.")
+    st.stop()
 
 # usable rows for modelling (same rule everywhere)
 model_df = hikes.dropna(subset=FEATURES + [TARGET])
