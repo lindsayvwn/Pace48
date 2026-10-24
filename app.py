@@ -22,7 +22,7 @@ PEAKS = pd.read_csv(HERE / "data" / "nh4000_peaks.csv")
 DEMO_CSV = HERE / "data" / "demo_activities_SYNTHETIC.csv"
 ACCENT = "#2E6F57"
 
-st.set_page_config(page_title="NH 4000-Footer Pace Predictor", page_icon="⛰️", layout="wide")
+st.set_page_config(page_title="NH 4000-Footer Pace Predictor", page_icon="🏔️", layout="wide")
 
 LABELS = {
     "distance_mi": "Distance (mi)", "ascent_ft": "Elevation gain (ft)", "descent_ft": "Elevation loss (ft)",
@@ -32,8 +32,34 @@ LABELS = {
 
 
 def fmt_hours(h: float) -> str:
+    """3.04 -> '3 h 02 min' (used for anything the viewer reads as a time)."""
     m = int(round(h * 60))
     return f"{m // 60} h {m % 60:02d} min"
+
+
+def fmt_delta(h: float) -> str:
+    """Short durations: 0.45 -> '27 min'; 1.6 -> '1 h 36 min'."""
+    m = int(round(h * 60))
+    return f"{m} min" if m < 60 else fmt_hours(h)
+
+
+# Animated loader: running, mountains, climbing, hiking, birds. Replaces Streamlit's built-in status figure.
+HIDE_DEFAULT_STATUS = "<style>[data-testid='stStatusWidget']{display:none !important;}</style>"
+LOADER_HTML = """
+<style>
+.trail-loader{display:flex;gap:.6rem;align-items:center;justify-content:center;padding:1.2rem 0 .2rem}
+.trail-loader span{display:inline-block;font-size:2.2rem;animation:trail-hop 1.3s ease-in-out infinite;
+  animation-delay:calc(var(--i) * 0.16s)}
+@keyframes trail-hop{0%,55%,100%{transform:translateY(0)}25%{transform:translateY(-16px)}}
+.trail-msg{text-align:center;opacity:.7;font-size:.95rem;padding-bottom:1rem}
+@media (prefers-reduced-motion: reduce){.trail-loader span{animation:none}}
+</style>
+<div class="trail-loader">
+  <span style="--i:0">🏃</span><span style="--i:1">🏔️</span><span style="--i:2">🧗</span>
+  <span style="--i:3">🥾</span><span style="--i:4">🐦</span>
+</div>
+<div class="trail-msg">Reading your Garmin activities…</div>
+"""
 
 
 def suggest_peaks(title: str) -> list[str]:
@@ -48,7 +74,8 @@ def suggest_peaks(title: str) -> list[str]:
 
 
 # ------------------------------------------------------------------ header
-st.title("⛰️ NH 4000-Footer Pace Predictor")
+st.markdown(HIDE_DEFAULT_STATUS, unsafe_allow_html=True)
+st.title("🥾 NH 4000-Footer Pace Predictor")
 st.info(
     "**What it's for and what happens when it's wrong:** this model estimates how long a New Hampshire "
     "4,000-footer will take *you*, based on the pace in your own past hikes — and if it's wrong (especially "
@@ -109,16 +136,20 @@ if csv_bytes is None:
     st.stop()
 
 
-@st.cache_data(show_spinner="Reading Garmin files…")
+@st.cache_data(show_spinner=False)
 def _load(csv_b, fit_tuple, du, eu):
     return load_activities(csv_b, list(fit_tuple), du, eu)
 
 
+loader = st.empty()
+loader.markdown(LOADER_HTML, unsafe_allow_html=True)
 try:
     activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit)
 except ValueError as e:
+    loader.empty()
     st.error(str(e))
     st.stop()
+loader.empty()
 for n in notes:
     st.warning(n)
 if activities.empty:
@@ -285,8 +316,10 @@ with tab3:
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Activities used", fit["n"])
         k2.metric("R²", f"{fit['r2']:.2f}", help="1.0 = perfect fit on your own data.")
-        k3.metric("Typical error (RMSE)", f"{fit['rmse']:.2f}")
-        k4.metric("Leave-one-out error", "n/a (need 6+)" if fit["loo_mae"] is None else f"{fit['loo_mae']:.2f}",
+        is_time = target == TARGET
+        err = (lambda v: fmt_delta(v)) if is_time else (lambda v: f"{v:.2f}")
+        k3.metric("Typical error (RMSE)", err(fit["rmse"]))
+        k4.metric("Leave-one-out error", "n/a (need 6+)" if fit["loo_mae"] is None else err(fit["loo_mae"]),
                   help="Average miss when each activity is predicted from all the others — more honest than R².")
         coefs = fit["model"].coef_
         st.caption(
@@ -298,7 +331,10 @@ with tab3:
         v1 = d1.number_input(LABELS[in1], value=float(round(model_df[in1].median(), 1)), min_value=0.0, key=f"v1-{in1}")
         v2 = d2.number_input(LABELS[in2], value=float(round(model_df[in2].median(), 1)), min_value=0.0, key=f"v2-{in2}")
         pred = predict(fit, {in1: v1, in2: v2})
-        st.success(f"Predicted **{LABELS[target]}: {pred:.2f}**")
+        if target == TARGET:
+            st.success(f"Predicted **{LABELS[target].replace(' (hr)', '')}: {fmt_hours(pred)}**")
+        else:
+            st.success(f"Predicted **{LABELS[target]}: {pred:.2f}**")
         tmp = model_df[feats + [target]].dropna().copy()
         tmp["predicted"] = fit["model"].predict(tmp[feats])
         f2 = px.scatter(tmp, x="predicted", y=target, labels={"predicted": f"Predicted {LABELS[target]}", target: f"Actual {LABELS[target]}"},
@@ -322,7 +358,7 @@ with tab4:
         )
     else:
         st.caption(
-            f"Linear regression trained on **{pm.n} hikes** · R² {pm.fit['r2']:.2f} · typical error ±{pm.fit['rmse']:.2f} h."
+            f"Linear regression trained on **{pm.n} hikes** · R² {pm.fit['r2']:.2f} · typical error ±{fmt_delta(pm.fit['rmse'])}."
         )
 
     peak = st.selectbox("Pick a peak", list(PEAKS["peak"]), index=list(PEAKS["peak"]).index("Tecumseh"))
@@ -337,9 +373,9 @@ with tab4:
     hrs = pm.hours(miles, gain)
     lo, hi = max(hrs - 1.28 * pm.spread, 0.25), hrs + 1.28 * pm.spread
     finish = (pd.Timestamp.combine(pd.Timestamp.today().date(), start) + pd.Timedelta(hours=hrs)).strftime("%-I:%M %p")
-    st.markdown(f"## Hiking **{peak}** will take you about **{hrs:.1f} hours**")
+    st.markdown(f"## Hiking **{peak}** will take you about **{fmt_hours(hrs)}**")
     st.markdown(
-        f"Likely range **{lo:.1f}–{hi:.1f} h** (a rough 80% range based on how far off the model is on your own hikes) · "
+        f"Likely range **{fmt_hours(lo)} – {fmt_hours(hi)}** (a rough 80% range based on how far off the model is on your own hikes) · "
         f"starting at {start.strftime('%-I:%M %p')} you'd finish around **{finish}**. "
         f"Plan for the high end."
     )
@@ -347,15 +383,18 @@ with tab4:
     past = hikes[hikes["peaks"].apply(lambda ps: peak in ps)]
     if len(past):
         r = past.iloc[-1]
-        st.info(f"You've hiked {peak} before ({r['date']:%b %d, %Y}): it took **{r['time_hr']:.1f} h**.")
+        st.info(f"You've hiked {peak} before ({r['date']:%b %d, %Y}): it took **{fmt_hours(r['time_hr'])}**.")
 
     with st.expander("All 48 peaks, ranked by predicted time"):
         tbl = PEAKS[["peak", "elevation_ft", "route_miles", "route_gain_ft"]].copy()
         tbl["predicted_hours"] = [pm.hours(m, g) for m, g in zip(tbl["route_miles"], tbl["route_gain_ft"])]
         done = {p for ps in hikes["peaks"] for p in ps}
         tbl["hiked"] = tbl["peak"].isin(done)
+        tbl["predicted_time"] = tbl["predicted_hours"].map(fmt_hours)
+        tbl = tbl[["peak", "elevation_ft", "route_miles", "route_gain_ft", "predicted_time", "predicted_hours", "hiked"]]
         st.dataframe(tbl.sort_values("predicted_hours"), hide_index=True, width="stretch",
-                     column_config={"predicted_hours": st.column_config.NumberColumn("Predicted hours", format="%.1f"),
+                     column_config={"predicted_time": "Predicted time",
+                                    "predicted_hours": st.column_config.NumberColumn("Hours (sortable)", format="%.1f"),
                                     "hiked": st.column_config.CheckboxColumn("Hiked?"),
                                     "route_miles": "Miles", "route_gain_ft": "Gain (ft)", "elevation_ft": "Summit (ft)"})
     st.caption(
