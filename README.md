@@ -2,8 +2,7 @@
 
 In 1957, the Appalachian Mountain Club (AMC) established the New Hampshire 48 hiking challenge. To complete the challenge, you must hike all 48 peaks in the white mountains that stand at least 4,0000 feet above sea level (_https://4000footers.com/nh.shtml_)
 
-A Streamlit app that learns **your** hiking pace from Garmin files and predicts how long each of New Hampshire's
-48 four-thousand-footers will take you.
+This project focuses on creating a streamlit app that will ingest your Garmin hiking data to predict how long it will take you to complete each NH48 (See the [**Notes**](#notes) section for current limitations and the roadmap for the app.)
 
 **Live app:** _https://pace48.streamlit.app/_
 
