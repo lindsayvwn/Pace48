@@ -571,11 +571,23 @@ with tab_prof:
             if pf is None:
                 st.warning("Couldn't read this hike's profile.")
             else:
+                has_pace_col = pf["pace_min_mi"].notna().any()
+                metric = st.radio("Show on the chart", ["Pace", "Heart rate"], horizontal=True,
+                                  index=0 if has_pace_col else 1, key="profile_metric")
+                if metric == "Pace" and not has_pace_col:
+                    st.info("This hike's saved profile has no pace data (saved by an older version). Re-upload its .zip to add it. "
+                            "Showing heart rate instead.")
+                    metric = "Heart rate"
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
                 fig.add_trace(go.Scatter(x=pf["miles"], y=pf["altitude_ft"], name="Elevation (ft)", fill="tozeroy",
                                          line=dict(color=ACCENT), fillcolor="rgba(46,111,87,0.25)"), secondary_y=False)
-                fig.add_trace(go.Scatter(x=pf["miles"], y=pf["heart_rate"], name="Heart rate (bpm)",
-                                         line=dict(color="#C0392B", width=1.5)), secondary_y=True)
+                if metric == "Pace":
+                    fig.add_trace(go.Scatter(x=pf["miles"], y=pf["pace_min_mi"], name="Pace (min/mi)",
+                                             line=dict(color="#2C5AA0", width=1.5), connectgaps=False,
+                                             hovertemplate="%{y:.1f} min/mi<extra></extra>"), secondary_y=True)
+                else:
+                    fig.add_trace(go.Scatter(x=pf["miles"], y=pf["heart_rate"], name="Heart rate (bpm)",
+                                             line=dict(color="#C0392B", width=1.5)), secondary_y=True)
                 stops = pf[pf["stop_min"] > 0]
                 slow = pf[pf["slow_min"] > 0]
                 if len(slow):
@@ -593,7 +605,10 @@ with tab_prof:
                         text=[f"stopped about {m:.0f} min" for m in stops["stop_min"]], hoverinfo="text+x"), secondary_y=False)
                 lo_a, hi_a = float(pf["altitude_ft"].min()), float(pf["altitude_ft"].max())
                 fig.update_yaxes(title_text="Elevation (ft)", range=[lo_a - 150, hi_a + 400], secondary_y=False)
-                fig.update_yaxes(title_text="Heart rate (bpm)", secondary_y=True)
+                if metric == "Pace":
+                    fig.update_yaxes(title_text="Moving pace (min/mi, faster is up)", autorange="reversed", secondary_y=True)
+                else:
+                    fig.update_yaxes(title_text="Heart rate (bpm)", secondary_y=True)
                 fig.update_xaxes(title_text="Miles from start")
                 fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400, legend=dict(orientation="h", y=1.12))
                 st.plotly_chart(fig, width="stretch")

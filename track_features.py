@@ -138,7 +138,7 @@ def extract(ts, dist_m, alt_m, hr, elapsed_s: float) -> dict:
     if all_up_m > 0:
         out["steep_ascent_pct"] = 100 * tot(bins["steep_up"], np.clip(dalt, 0, None)) / all_up_m
 
-    out["profile"] = _profile(df, dist, alt, cands, hr_sd)
+    out["profile"] = _profile(df, dist, alt, cands, hr_sd, dt, moving)
     return out
 
 
@@ -200,7 +200,7 @@ def is_break(c: dict, min_stop_s: float, hr_drop_sd: float) -> bool:
     return c["hr_drop"] >= hr_drop_sd
 
 
-def _profile(df, dist, alt, cands, hr_sd=None) -> str:
+def _profile(df, dist, alt, cands, hr_sd=None, dt=None, moving=None) -> str:
     """~80 evenly spaced points along the route: miles, altitude (ft), heart rate (bpm); plus the slow stretches ("c"):
     [mile, seconds, share of it timer-paused, heart-rate drop in SDs or null]; "sd" = that SD in bpm, so stop rules can be re-applied without the .fit file."""
     total = dist[-1]
@@ -215,12 +215,27 @@ def _profile(df, dist, alt, cands, hr_sd=None) -> str:
         hr_c = np.interp(centers, gh["d"], gh["h"])
     else:
         hr_c = np.full(PROFILE_POINTS, np.nan)
+    pace = np.full(PROFILE_POINTS, np.nan)   # min/mi of MOVING time in each slice (breaks excluded), lightly smoothed
+    if dt is not None and moving is not None:
+        k = np.clip(np.digitize(dist, edges) - 1, 0, PROFILE_POINTS - 1)
+        sec = np.bincount(k, weights=np.where(moving, dt, 0.0), minlength=PROFILE_POINTS)
+        mi = np.diff(edges) / M_PER_MILE
+        raw = np.where(sec >= 20, sec / 60 / mi, np.nan)
+        pace = pd.Series(np.clip(raw, 0, 60)).rolling(3, center=True, min_periods=1).mean().to_numpy()
     rnd = lambda arr, n: [None if not np.isfinite(x) else round(float(x), n) for x in arr]  # noqa: E731
     c = [[round(x["mile"], 2), int(round(x["secs"])), round(x["paused_frac"], 2),
           None if x["hr_drop"] is None else round(x["hr_drop"], 2)] for x in cands]
-    return json.dumps({"v": TRACK_VERSION, "d": rnd(centers / M_PER_MILE, 2), "a": rnd(alt_c, 0), "h": rnd(hr_c, 0), "c": c,
+    return json.dumps({"v": TRACK_VERSION, "d": rnd(centers / M_PER_MILE, 2), "a": rnd(alt_c, 0), "h": rnd(hr_c, 0), "p": rnd(pace, 1), "c": c,
                        "sd": None if hr_sd is None else round(hr_sd, 1)},
                       separators=(",", ":"))
+
+
+def has_pace(profile_json) -> bool:
+    """True if a saved profile carries the per-slice pace series (profiles made before it was added don't)."""
+    try:
+        return "p" in json.loads(profile_json)
+    except Exception:
+        return False
 
 
 def profile_version(profile_json) -> int:
@@ -266,13 +281,15 @@ def apply_stop_rules(df: pd.DataFrame, min_stop_s: float, hr_drop_sd: float) -> 
 
 
 def profile_frame(profile_json: str, min_stop_s: float = DEFAULT_MIN_STOP_S, hr_drop_sd: float = DEFAULT_HR_DROP_SD) -> pd.DataFrame | None:
-    """Saved profile string -> DataFrame(miles, altitude_ft, heart_rate, stop_min, slow_min), or None.
+    """Saved profile string -> DataFrame(miles, altitude_ft, heart_rate, pace_min_mi, stop_min, slow_min), or None.
     stop_min = minutes of real breaks starting in that slice; slow_min = minutes of slow technical going."""
     if not isinstance(profile_json, str) or not profile_json.strip():
         return None
     try:
         p = json.loads(profile_json)
-        df = pd.DataFrame({"miles": p["d"], "altitude_ft": p["a"], "heart_rate": p["h"]})
+        df = pd.DataFrame({"miles": p["d"], "altitude_ft": p["a"], "heart_rate": p["h"],
+                           "pace_min_mi": p.get("p") or [None] * len(p["d"])})
+        df["pace_min_mi"] = pd.to_numeric(df["pace_min_mi"], errors="coerce")
         stop, slow = np.zeros(len(df)), np.zeros(len(df))
         miles = df["miles"].to_numpy(dtype=float)
         for c in _cands_from_profile(p):

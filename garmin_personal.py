@@ -28,7 +28,7 @@ import requests
 
 from garmin_io import HIKE_COLUMNS, FT_PER_M, M_PER_MILE, NUMERIC, merge_sources, read_fit_uploads
 from tags_io import hikes_from_csv, hikes_to_csv
-from track_features import TRACK_NUMERIC, TRACK_VERSION, profile_version
+from track_features import TRACK_NUMERIC, TRACK_VERSION, has_pace, profile_version
 
 DEFAULT_BASE_URL = "https://personal.connectapi.garmin.com"
 BASE_URL_ENV = "GARMIN_PERSONAL_API_BASE_URL"
@@ -186,7 +186,7 @@ def _read_cache() -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=HIKE_COLUMNS)
     # drop rows computed by an older version of the stop/pace definitions so they are re-downloaded and recomputed
-    stale = df["moving_hr"].notna() & (df["profile"].map(profile_version) != TRACK_VERSION)
+    stale = df["moving_hr"].notna() & ((df["profile"].map(profile_version) != TRACK_VERSION) | ~df["profile"].map(has_pace))
     return df[~stale][HIKE_COLUMNS].reset_index(drop=True)
 
 
