@@ -73,6 +73,27 @@ def plot(fig, target=st):
     target.plotly_chart(fig, width="stretch")
 
 
+HOUR_COLS = {"time_hr", "moving_hr", "stopped_hr"}
+
+
+def fmt_value(col: str, v) -> str:
+    """Hours read as h:mm (4.5 -> 4:30); every other number to 2 decimals."""
+    if pd.isna(v):
+        return "n/a"
+    if col in HOUR_COLS:
+        m = int(round(float(v) * 60))
+        return f"{m // 60}:{m % 60:02d}"
+    return f"{float(v):,.2f}"
+
+
+def hour_ticks(fig, axis: str, lo: float, hi: float) -> None:
+    """Whole-hour ticks labelled 4:00, 5:00 ... on the chosen axis ('x' or 'y')."""
+    step = 1 if (hi - lo) <= 10 else 2
+    ticks = [float(t) for t in np.arange(np.floor(lo), np.ceil(hi) + 1, step)]
+    upd = fig.update_xaxes if axis == "x" else fig.update_yaxes
+    upd(tickmode="array", tickvals=ticks, ticktext=[f"{int(t)}:00" for t in ticks])
+
+
 WINTER_MONTHS = (12, 1, 2, 3)   # December to March
 SEASON_COLORS = {"Winter (Dec-Mar)": "#3B6FB6", "Rest of year": ACCENT}
 
@@ -663,19 +684,50 @@ with tab2:
         chart = a.selectbox("Chart type", ["Scatter", "Line", "Histogram"])
         ycol = b.selectbox("Column", numeric_cols, format_func=LABELS.get,
                            index=numeric_cols.index(TARGET) if TARGET in numeric_cols else 0)
+        src = (model_df if ycol in model_df else hikes).copy()
+        src["when"] = pd.to_datetime(src["date"], errors="coerce").dt.strftime("%b %d, %Y").fillna("")
+        fig = go.Figure()
+        dot = dict(size=13, color=ACCENT, line=dict(color="white", width=1))
         if chart == "Scatter":
             others = [x for x in numeric_cols if x != ycol]
             xcol = c.selectbox("Compare against", others, format_func=LABELS.get,
                                index=others.index("distance_mi") if "distance_mi" in others else 0)
-            fig = px.scatter(model_df if ycol in model_df else hikes, x=xcol, y=ycol, hover_name="title",
-                             trendline="ols" if len(hikes) >= 3 else None,
-                             labels=LABELS, color_discrete_sequence=[ACCENT])
+            d = src.dropna(subset=[xcol, ycol])
+            if len(d) >= 3:   # least-squares trend line
+                k, m0 = np.polyfit(d[xcol].astype(float), d[ycol].astype(float), 1)
+                xs = np.array([d[xcol].min(), d[xcol].max()], dtype=float)
+                fig.add_trace(go.Scatter(x=xs, y=k * xs + m0, mode="lines", hoverinfo="skip", showlegend=False,
+                                         line=dict(dash="dot", color="gray")))
+            fig.add_trace(go.Scatter(
+                x=d[xcol], y=d[ycol], mode="markers", marker=dot, showlegend=False,
+                customdata=np.stack([d["title"].astype(str), d["when"], d[xcol].map(lambda v: fmt_value(xcol, v)),
+                                     d[ycol].map(lambda v: fmt_value(ycol, v))], axis=-1),
+                hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]}<br>" + LABELS[xcol] + ": %{customdata[2]}<br>"
+                              + LABELS[ycol] + ": %{customdata[3]}<extra></extra>"))
+            fig.update_xaxes(title_text=LABELS[xcol])
+            fig.update_yaxes(title_text=LABELS[ycol])
+            if xcol in HOUR_COLS:
+                hour_ticks(fig, "x", float(d[xcol].min()), float(d[xcol].max()))
         elif chart == "Line":
-            fig = px.line(hikes.sort_values("date"), x="date", y=ycol, markers=True, hover_name="title",
-                          labels={**LABELS, "date": "Date"}, color_discrete_sequence=[ACCENT])
+            d = src.dropna(subset=[ycol]).sort_values("date")
+            fig.add_trace(go.Scatter(
+                x=d["date"], y=d[ycol], mode="lines+markers", marker=dict(dot, size=12), line=dict(color=ACCENT, width=2),
+                showlegend=False,
+                customdata=np.stack([d["title"].astype(str), d["when"], d[ycol].map(lambda v: fmt_value(ycol, v))], axis=-1),
+                hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]}<br>" + LABELS[ycol] + ": %{customdata[2]}<extra></extra>"))
+            fig.update_xaxes(title_text="Date")
+            fig.update_yaxes(title_text=LABELS[ycol])
         else:
             bins = c.slider("Bins", 5, 40, 12)
-            fig = px.histogram(hikes, x=ycol, nbins=bins, labels=LABELS, color_discrete_sequence=[ACCENT])
+            d = src.dropna(subset=[ycol])
+            fig.add_trace(go.Histogram(x=d[ycol], nbinsx=bins, marker=dict(color=ACCENT, line=dict(color="white", width=1)),
+                                       showlegend=False, hovertemplate="%{x}: %{y} hike(s)<extra></extra>"))
+            fig.update_xaxes(title_text=LABELS[ycol])
+            fig.update_yaxes(title_text="Number of hikes")
+            if ycol in HOUR_COLS:
+                hour_ticks(fig, "x", float(d[ycol].min()), float(d[ycol].max()))
+        if chart != "Histogram" and ycol in HOUR_COLS:
+            hour_ticks(fig, "y", float(d[ycol].min()), float(d[ycol].max()))
         fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=430)
         plot(fig)
 
