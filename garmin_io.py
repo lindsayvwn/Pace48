@@ -1,7 +1,7 @@
 """Read Garmin exports (.fit, .zip of .fit files, or Garmin Connect Activities.csv)
 into ONE tidy table with fixed column names, in a fixed order.
 
-Privacy: only the handful of numeric summary fields below are kept. GPS tracks,
+Privacy: only the handful of numeric summary fields below are kept. GPS tracks are never saved or shown (positions are used in memory only, to spot rests),
 your name, weight, device serial etc. inside a .fit file are never read into the table.
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
 
     session = None
     local_ts = None
-    rec: dict[str, list] = {"t": [], "d": [], "a": [], "h": []}  # time, distance, altitude, heart rate
+    rec: dict[str, list] = {"t": [], "d": [], "a": [], "h": [], "la": [], "lo": []}  # time, distance, altitude, heart rate, position (used only in memory, see track_features)
     try:
         with fitdecode.FitReader(io.BytesIO(data)) as reader:
             for frame in reader:
@@ -48,11 +48,13 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
                         "sport", "sub_sport", "start_time", "total_distance", "total_ascent", "total_descent",
                         "total_timer_time", "total_elapsed_time", "avg_heart_rate", "max_heart_rate",
                         "total_calories")}
-                elif frame.name == "record":  # no GPS fields are read
+                elif frame.name == "record":  # position is read only so track_features can spot stationary rests; it is never stored
                     rec["t"].append(frame.get_value("timestamp", fallback=None))
                     rec["d"].append(frame.get_value("distance", fallback=None))
                     rec["a"].append(frame.get_value("enhanced_altitude", fallback=frame.get_value("altitude", fallback=None)))
                     rec["h"].append(frame.get_value("heart_rate", fallback=None))
+                    rec["la"].append(frame.get_value("position_lat", fallback=None))
+                    rec["lo"].append(frame.get_value("position_long", fallback=None))
                 elif frame.name == "activity" and local_ts is None:
                     local_ts = frame.get_value("local_timestamp", fallback=None)
     except Exception:
@@ -65,7 +67,7 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
     if secs is None:
         return None
     try:
-        track = extract(rec["t"], rec["d"], rec["a"], rec["h"], secs)
+        track = extract(rec["t"], rec["d"], rec["a"], rec["h"], secs, rec["la"], rec["lo"])
     except Exception:  # a odd track must never stop the hike from loading
         track = empty_features()
     start = session["start_time"]

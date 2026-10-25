@@ -23,12 +23,19 @@ This project focuses on creating a streamlit app that will ingest your Garmin hi
 With fewer than 5 hikes the app falls back to the Naismith rule scaled to your pace and says so on screen.
 
 ## How stops are detected
-Every hike is judged against itself, not against fixed numbers. A slow stretch is one where your progress (ground distance plus height
-gained, Naismith-style: 1 m climbed counts like 8 m walked, so steep scrambling counts) was under about 40% of your typical moving speed on that hike. A slow stretch of 3+ minutes is a
-*break* only if the watch timer paused or your heart rate fell at least 2 standard deviations below where it was while moving
+Every hike is judged against itself, not against fixed numbers. Your progress is measured over a **1 minute moving window** (ground distance plus height
+gained, Naismith-style: 1 m climbed counts like 8 m walked). A stretch is *slow* when progress is under about 40% of your typical moving speed on that hike,
+**unless** you were climbing or dropping fast (about 950 ft/hr or more): slow on the ground but steep vertical effort counts as moving.
+
+A slow stretch of 1+ minute (the default; adjustable) is a *break* if any of these hold: the watch timer paused; your GPS points stayed inside a tight
+**5 metre circle** for a minute or more (a DBSCAN cluster, see below); or your heart rate fell at least 2 standard deviations below where it was while moving
 (the standard deviation is how much your heart rate normally wobbles from minute to minute on that hike). Slow stretches where heart rate stayed up (ice, rock)
-are shown as *slow technical* and count as moving. Both numbers can be changed in the sidebar under "Stop detection (advanced)"; the raw
-slow stretches are saved with each hike, so changing them is instant. This is unsupervised: no labelled breaks, so treat the default as a starting point.
+are shown as *slow technical* and count as moving. The shortest-break and heart-rate numbers live at the top of the **Your pace profile** tab under
+"Stop detection (advanced)"; the raw slow stretches are saved with each hike, so changing them is instant. This is unsupervised: no labelled breaks, so treat the default as a starting point.
+
+**Stationary clusters.** While a `.fit` file is being read, its own GPS positions are converted to metres and clustered with DBSCAN (eps 5 m). A cluster only counts
+if it holds you for at least a minute, is compact (90% of points within 8 m of its centre) and you were not climbing quickly. Those seconds are forced to "not moving" and the stretch is a break.
+Only that hike's own coordinates are ever looked at, they stay in memory for the length of the calculation, and nothing saved or shown contains a coordinate.
 
 ## Peak tags
 Titles are matched to the 48 peaks automatically, forgiving of "Mt."/"Mount" and small spelling slips ("Waumbeck"). Shorthand such as
@@ -58,7 +65,7 @@ API before exposing your data on a public site. On hosts with a temporary disk t
 
 ## Privacy
 - Your Garmin data is **never committed** (`.gitignore` blocks `.fit` and `Activities.csv`) and is processed in memory only.
-- From `.fit` files only distance, climb, time, date, heart-rate summaries and a small (~80 point) elevation/heart-rate profile are kept: no GPS coordinates, name or weight.
+- From `.fit` files only distance, climb, time, date, heart-rate summaries and a small (~80 point) elevation/heart-rate profile are kept: no GPS coordinates (positions are used in memory only to spot rests, then discarded), name or weight.
 - `data/demo_activities_SYNTHETIC.csv` is **fake** data for trying the app.
 
 ## Data

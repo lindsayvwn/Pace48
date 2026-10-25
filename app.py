@@ -332,16 +332,6 @@ with st.sidebar:
         help="The file you downloaded from this app last time. It restores your NH 4000 tags and exclusions.",
     )
     use_demo = st.checkbox("No Garmin data? Use synthetic demo data", value=False)
-    with st.expander("Stop detection (advanced)"):
-        stop_min_min = st.slider("Shortest break to count (minutes)", 1, 10, DEFAULT_MIN_STOP_S // 60,
-                                 help="A slow or still stretch shorter than this counts as moving.")
-        hr_drop = st.slider("Heart-rate drop that proves a rest (standard deviations)", 0.0, 6.0, float(DEFAULT_HR_DROP_SD), 0.25,
-                            help="Each hike is judged against itself: the app measures how much YOUR heart rate normally varies "
-                                 "while you move on that hike (one standard deviation, often 10-15 bpm). On ice or scrambling the watch "
-                                 "can look 'stopped' while you are working hard. A slow stretch only counts as a break if your heart "
-                                 "rate fell at least this many standard deviations below where it was while moving, or the watch "
-                                 "timer paused. Other slow stretches are shown as 'slow technical' and counted as moving. "
-                                 "Higher = fewer breaks. 0 = ignore heart rate.")
     c1, c2 = st.columns(2)
     dist_unit = c1.radio("CSV distance", ["mi", "km"], horizontal=True)
     elev_unit = c2.radio("CSV elevation", ["ft", "m"], horizontal=True)
@@ -353,7 +343,7 @@ with st.sidebar:
         )
     st.caption(
         "🔒 Files are read in memory for this session only. From .fit files the app keeps just distance, "
-        "climb, time, date, heart-rate summaries and a small elevation/heart-rate profile: **no GPS, name or weight**. Nothing is saved on a server."
+        "climb, time, date, heart-rate summaries and a small elevation/heart-rate profile: **no GPS, name or weight** are saved (positions are checked in memory only, to spot rests, then discarded). Nothing is saved on a server."
     )
     st.caption(
         "Why no Garmin login? Garmin only allows account connections for approved companies, and asking for "
@@ -485,7 +475,31 @@ chosen_types = st.sidebar.multiselect(
          "so mixing types can make predictions too optimistic.",
 )
 all_rows = activities[activities["activity_type"].isin(chosen_types)].reset_index(drop=True)
-all_rows = apply_stop_rules(all_rows, stop_min_min * 60, hr_drop)   # stopped/moving time under the sidebar's stop rules
+# The tabs are created here (before the stop rules are applied) so the stop-detection controls can live at the top of the
+# pace-profile tab and still feed every other tab. Streamlit lets us write into a tab again later.
+tab1, tab2, tab3, tab4, tab_prof, tab5 = st.tabs(
+    ["① Preview, tag & exclude", "② Explore", "③ Build a model", "④ Predict an NH 4000-footer",
+     "Your pace profile", "Limitations & roadmap"]
+)
+with tab_prof:
+    st.subheader("Your pace profile")
+    with st.expander("Stop detection (advanced)"):
+        stop_min_min = st.slider("Shortest break to count (minutes)", 1, 10, DEFAULT_MIN_STOP_S // 60, key="stop_min_min",
+                                 help="A slow or still stretch shorter than this counts as moving. Changing it re-computes stopped time "
+                                      "for every hike, in every tab.")
+        hr_drop = st.slider("Heart-rate drop that proves a rest (standard deviations)", 0.0, 6.0, float(DEFAULT_HR_DROP_SD), 0.25,
+                            key="hr_drop",
+                            help="Each hike is judged against itself: the app measures how much YOUR heart rate normally varies "
+                                 "while you move on that hike (one standard deviation, often 10-15 bpm). A slow stretch only counts as a "
+                                 "break if your heart rate fell at least this many standard deviations below where it was while moving, "
+                                 "or the watch timer paused, or you stood inside a tight 5 m circle for a minute or more (see below). "
+                                 "Other slow stretches are shown as 'slow technical' and counted as moving. Higher = fewer breaks. "
+                                 "0 = ignore heart rate.")
+        st.caption("How slow is measured: your speed over a **1 minute** moving window. If you are slow on the ground but climbing or "
+                   "dropping quickly (about 950 ft/hr or more), that is effort, not a pause. If your GPS points sit inside a tight "
+                   "**5 m circle** (DBSCAN clustering) for a minute or more, that is a stationary rest break. GPS is used only in memory "
+                   "while a file is read to find those clusters; no coordinate is saved, shown or sent anywhere.")
+all_rows = apply_stop_rules(all_rows, stop_min_min * 60, hr_drop)   # stopped/moving time under the pace-profile tab's stop rules
 all_rows["stopped_pct"] = 100 * all_rows["stopped_hr"] / all_rows["time_hr"].where(all_rows["time_hr"] > 0)
 if all_rows.empty:
     st.error("No activities of the selected types.")
@@ -529,11 +543,6 @@ for _, r in all_rows.iterrows():
         entry["peaks"] = suggest_peaks(r["title"])
     entry.update(date=f"{r['date']:%Y-%m-%d}" if pd.notna(r["date"]) else "", title=r["title"],
                  distance_mi=round(float(r["distance_mi"]), 2) if pd.notna(r["distance_mi"]) else "")
-
-tab1, tab2, tab3, tab4, tab_prof, tab5 = st.tabs(
-    ["① Preview, tag & exclude", "② Explore", "③ Build a model", "④ Predict an NH 4000-footer",
-     "Your pace profile", "Limitations & roadmap"]
-)
 
 # ============================================================ TAB 5 (drawn first so it shows even if a later step stops)
 with tab5:
@@ -738,7 +747,6 @@ def _num(v, unit="", dec=0):
 
 
 with tab_prof:
-    st.subheader("Your pace profile")
     trk = hikes.dropna(subset=["moving_hr"]).reset_index(drop=True)
     if trk.empty:
         st.info("This tab needs the .zip/.fit files for your hikes, not just Activities.csv. They carry the second-by-second "
@@ -915,11 +923,11 @@ with tab_prof:
             f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?",
                              legend_title_text="", legend=dict(orientation="h", y=-0.25))
             plot(f2)
-        st.caption("A stop is a break: a stretch at or above the shortest-break setting (sidebar, default 3 minutes) where you made "
-                   "almost no progress (under about 40% of your typical moving speed on that hike, over 45 seconds; climbing counts "
-                   "as progress, 1 m up is worth about 8 m of flat ground, so a slow scramble isn't mistaken for standing still; the "
-                   "watch's own speed reading drops to zero too often to trust) AND either the "
-                   "watch's timer paused or your heart rate fell by the sidebar's number of standard deviations (measured on that hike's own "
+        st.caption("A stop is a break: a stretch at or above the shortest-break setting (above, default 1 minute) where you made "
+                   "almost no progress (under about 40% of your typical moving speed on that hike, over a 1 minute moving window; climbing counts "
+                   "as progress, 1 m up is worth about 8 m of flat ground, and climbing or dropping at 950+ ft/hr overrides a pause, so a slow scramble isn't "
+                   "mistaken for standing still; the watch's own speed reading drops to zero too often to trust) AND either the "
+                   "watch's timer paused, you stayed inside a tight 5 m circle (a DBSCAN cluster of your GPS points, used in memory only) or your heart rate fell by the chosen number of standard deviations (measured on that hike's own "
                    "minute-to-minute heart-rate variation). Slow stretches where it stayed up, like ice or rock, are 'slow technical' "
                    "time and count as moving. Grade is measured over about 100 m of trail from smoothed barometric "
                    "altitude, so short scrambles are averaged out. Peak predictions use distance and total climb because "
