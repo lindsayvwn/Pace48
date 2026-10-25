@@ -136,7 +136,8 @@ if csv_bytes is None and saved_up is None:
 
 
 @st.cache_data(show_spinner=False)
-def _load(csv_b, fit_tuple, du, eu):
+def _load(csv_b, fit_tuple, du, eu, schema):
+    # `schema` is only part of the cache key: when the table's columns change, old cached tables are not reused
     return load_activities(csv_b, list(fit_tuple), du, eu)
 
 
@@ -144,7 +145,7 @@ loader = st.empty()
 loader.markdown(LOADER_HTML, unsafe_allow_html=True)
 try:
     if csv_bytes is not None:
-        activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit)
+        activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit, tuple(HIKE_COLUMNS))
     else:
         activities, notes = pd.DataFrame(columns=HIKE_COLUMNS), []
         if fit_files:
@@ -159,6 +160,9 @@ if saved_df is not None:
     n_before = len(saved_df)
     activities = combine_saved(saved_df[HIKE_COLUMNS], activities)
     st.caption(f"Loaded **{n_before} saved hikes**; {len(activities) - n_before} new from this visit's uploads.")
+for _c in HIKE_COLUMNS:  # belt and braces: never crash on a table that lacks a column
+    if _c not in activities.columns:
+        activities[_c] = ""
 for n in notes:
     st.warning(n)
 if activities.empty:
