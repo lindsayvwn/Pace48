@@ -55,6 +55,25 @@ def fmt_delta(h: float) -> str:
     return f"{m} min" if m < 60 else fmt_hours(h)
 
 
+WINTER_MONTHS = (12, 1, 2, 3)   # December to March
+SEASON_COLORS = {"Winter (Dec-Mar)": "#3B6FB6", "Rest of year": ACCENT}
+
+
+def season_of(ts) -> str:
+    return "Winter (Dec-Mar)" if pd.notna(ts) and ts.month in WINTER_MONTHS else "Rest of year"
+
+
+def uphill_hr(profile_json) -> float:
+    """Average heart rate over the uphill (>=5% grade) slices of a hike's saved profile; NaN if it can't be told."""
+    pf = profile_frame(profile_json) if isinstance(profile_json, str) else None
+    if pf is None or pf["heart_rate"].notna().sum() < 10:
+        return float("nan")
+    dm = pf["miles"].diff() * 5280
+    grade = pf["altitude_ft"].diff() / dm.where(dm > 0)
+    hr = pf["heart_rate"][grade >= 0.05]
+    return float(hr.mean()) if hr.notna().sum() >= 5 else float("nan")
+
+
 # Animated loader: running, mountains, climbing, hiking, birds. Replaces Streamlit's built-in status figure.
 HIDE_DEFAULT_STATUS = "<style>[data-testid='stStatusWidget']{display:none !important;}</style>"
 LOADER_HTML = """
@@ -629,23 +648,80 @@ with tab_prof:
                 )
 
         if len(trk) >= 2:
-            c1, c2 = st.columns(2)
-            rates = trk.sort_values("date").melt(id_vars=["date", "title"],
-                                                 value_vars=["climb_rate_fthr", "steep_climb_rate_fthr"],
-                                                 var_name="measure", value_name="ft_per_hr").dropna(subset=["ft_per_hr"])
-            if len(rates):
-                rates["measure"] = rates["measure"].map(LABELS)
-                f1 = px.line(rates, x="date", y="ft_per_hr", color="measure", markers=True, hover_name="title",
-                             labels={"ft_per_hr": "Feet climbed per hour", "date": "Date", "measure": ""},
-                             color_discrete_sequence=[ACCENT, "#C0392B"])
-                f1.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Is your climbing getting faster?",
-                                 legend=dict(orientation="h", y=-0.25))
+            trk = trk.copy()
+            trk["season"] = trk["date"].map(season_of)
+            trk["uphill_hr"] = trk["profile"].map(uphill_hr)
+            trk["efficiency"] = trk["climb_rate_fthr"] / trk["uphill_hr"]   # feet climbed per hour, per heartbeat-per-minute of effort
+            trk["when"] = trk["date"].dt.strftime("%b %d, %Y")
+            eff = trk.dropna(subset=["efficiency"]).sort_values("date")
+            st.markdown("#### Climbing efficiency: how much climbing do you get for your effort?")
+            if len(eff) < 2:
+                st.info("This needs at least 2 hikes with heart-rate data and a climb rate (.fit/.zip files).")
+            else:
+                c1, c2 = st.columns(2)
+                f1 = px.scatter(eff, x="uphill_hr", y="climb_rate_fthr", color="season", color_discrete_map=SEASON_COLORS,
+                                hover_name="title", hover_data={"when": True, "uphill_hr": ":.0f", "climb_rate_fthr": ":.0f",
+                                                                 "efficiency": ":.1f", "season": False},
+                                labels={"uphill_hr": "Average heart rate while climbing (bpm)",
+                                        "climb_rate_fthr": "Climb rate (ft/hr)", "when": "Date", "efficiency": "ft/hr per bpm"})
+                f1.update_traces(marker=dict(size=12, line=dict(color="white", width=1)))
+                f1.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=340, legend_title_text="",
+                                 legend=dict(orientation="h", y=-0.28), title="Higher and to the left = fitter")
                 c1.plotly_chart(f1, width="stretch")
-            f2 = px.scatter(trk, x="distance_mi", y="stopped_pct", hover_name="title", size="time_hr",
-                            labels={"distance_mi": "Distance (mi)", "stopped_pct": "Stopped (% of time)"},
-                            color_discrete_sequence=[ACCENT])
-            f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?")
-            c2.plotly_chart(f2, width="stretch")
+                f1b = go.Figure()
+                f1b.add_trace(go.Scatter(x=eff["date"], y=eff["efficiency"], mode="lines", hoverinfo="skip", showlegend=False,
+                                         line=dict(color="#B8C2BD", width=1.5)))
+                for sname, g in eff.groupby("season"):
+                    f1b.add_trace(go.Scatter(x=g["date"], y=g["efficiency"], mode="markers", name=sname, text=g["title"],
+                                             marker=dict(size=12, color=SEASON_COLORS[sname], line=dict(color="white", width=1)),
+                                             hovertemplate="<b>%{text}</b><br>%{x|%b %d, %Y}<br>%{y:.1f} ft/hr per bpm<extra></extra>"))
+                f1b.update_xaxes(title_text="Date")
+                f1b.update_yaxes(title_text="Climb rate per bpm (ft/hr per bpm)")
+                f1b.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=340, legend_title_text="",
+                                  legend=dict(orientation="h", y=-0.28), title="Is it improving over time?")
+                c2.plotly_chart(f1b, width="stretch")
+                st.caption("Efficiency = your climb rate divided by your average heart rate on the uphill parts. If it rises, you are "
+                           "getting more climbing out of the same effort. Heart rate also moves with heat, sleep and caffeine, and a "
+                           "winter climb is slower for reasons that have nothing to do with fitness, so compare like with like "
+                           "(the colours separate winter from the rest of the year).")
+
+            st.markdown("#### Winter vs the rest of the year")
+            n_w = int((trk["season"] == "Winter (Dec-Mar)").sum())
+            n_o = len(trk) - n_w
+            trk["slow_pct"] = 100 * trk.get("slow_technical_hr", np.nan) / trk["time_hr"].where(trk["time_hr"] > 0)
+            season_metrics = {
+                "climb_rate_fthr": "Climb rate (ft/hr)", "steep_climb_rate_fthr": "Steep climb rate (ft/hr)",
+                "flat_pace_min_mi": "Flat-ground pace (min/mi)", "descent_rate_fthr": "Descent rate (ft/hr)",
+                "stopped_pct": "Stopped (% of time)", "slow_pct": "Slow technical going (% of time)",
+                "efficiency": "Climb rate per bpm", "avg_hr": "Average heart rate (bpm)",
+            }
+            if n_w < 2 or n_o < 2:
+                st.info(f"Only {n_w} winter and {n_o} other hike(s) with track data, so there isn't enough to compare yet. "
+                        "Winter here means December to March.")
+            else:
+                cols = [c for c in season_metrics if c in trk and trk[c].notna().any()]
+                summ = trk.groupby("season")[cols].median().T
+                summ.index = [season_metrics[c] for c in summ.index]
+                summ = summ.reindex(columns=list(SEASON_COLORS))
+                summ["Difference"] = summ["Winter (Dec-Mar)"] - summ["Rest of year"]
+                st.caption(f"Medians: {n_w} winter hike(s), {n_o} others. Winter = December to March.")
+                st.dataframe(summ.round(1), width="stretch")
+                pick_m = st.selectbox("Compare", cols, format_func=season_metrics.get, key="season_metric")
+                fb = px.box(trk.dropna(subset=[pick_m]), x="season", y=pick_m, color="season", color_discrete_map=SEASON_COLORS,
+                            points="all", hover_name="title", category_orders={"season": list(SEASON_COLORS)},
+                            labels={pick_m: season_metrics[pick_m], "season": ""})
+                fb.update_traces(marker=dict(size=9), boxmean=False)
+                fb.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=340, showlegend=False)
+                st.plotly_chart(fb, width="stretch")
+                if min(n_w, n_o) < 5:
+                    st.caption("⚠️ Fewer than 5 hikes in one group: treat differences as hints, not findings.")
+
+            f2 = px.scatter(trk, x="distance_mi", y="stopped_pct", hover_name="title", size="time_hr", color="season",
+                            color_discrete_map=SEASON_COLORS,
+                            labels={"distance_mi": "Distance (mi)", "stopped_pct": "Stopped (% of time)"})
+            f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?",
+                             legend_title_text="", legend=dict(orientation="h", y=-0.25))
+            st.plotly_chart(f2, width="stretch")
         st.caption("A stop is a break: a stretch at or above the shortest-break setting (sidebar, default 3 minutes) where you made "
                    "almost no progress (under about 40% of your typical moving speed on that hike, over 45 seconds; climbing counts "
                    "as progress, 1 m up is worth about 8 m of flat ground, so a slow scramble isn't mistaken for standing still; the "
@@ -732,13 +808,13 @@ with tab3:
             f2.update_yaxes(**yax)
             f2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=380, hoverlabel=dict(font_size=14))
             st.plotly_chart(f2, width="stretch")
-            st.caption("Dotted line = prediction line. Hover a dot to see which hike it is.")
+            st.caption("Dots on the dotted line = perfect predictions. Hover a dot to see which hike it is.")
             st.caption(
-                f"**Limitations:** this model is fit on {fit['n']} activit{'y' if fit['n'] == 1 else 'ies'}. Small samples make these results less reliable, so interpret them with caution."
-                " Additional variables that may influence results are season (winter versus summer), rest times, hiking buddies, etc. These variables can shift results noticeably. "
-                "The model only sees only sees distance and climb, not weather, trail roughness or how tired you were, and it is least reliable for "
+                f"**Limitations:** this model is fit on {fit['n']} activit{'y' if fit['n'] == 1 else 'ies'}, a small sample, so a single unusual day "
+                "(an icy hike, a long summit rest, a slow group) can shift it noticeably, and the error figures above are rough. "
+                "It only sees distance and climb, not weather, trail roughness or how tired you were, and it is least reliable for "
                 "trips longer or steeper than anything you've logged. More activities, ideally with a mix of lengths and "
-                "climbs, will improve predictions."
+                "climbs, will make the predictions steadier and better."
             )
 
 # ============================================================ TAB 4
