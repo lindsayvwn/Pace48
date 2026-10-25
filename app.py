@@ -55,6 +55,23 @@ def fmt_delta(h: float) -> str:
     return f"{m} min" if m < 60 else fmt_hours(h)
 
 
+def plot(fig, target=st):
+    """One look for every chart: no gridlines, larger axis titles, tick labels and legend, hover numbers to 2 decimals."""
+    fig.update_xaxes(showgrid=False, zeroline=False, automargin=True, title_font=dict(size=18), tickfont=dict(size=14))
+    fig.update_yaxes(showgrid=False, zeroline=False, automargin=True, title_font=dict(size=18), tickfont=dict(size=14))
+    fig.update_layout(legend=dict(font=dict(size=15)), legend_title_font=dict(size=15), hoverlabel=dict(font_size=14))
+    for tr in fig.data:   # px's default hover prints raw floats (14.684094...): cap them at 2 decimals
+        ht = getattr(tr, "hovertemplate", None)
+        if not ht:
+            continue
+        for ax in ("x", "y"):
+            vals = getattr(tr, ax, None)
+            if vals is not None and len(vals) and np.issubdtype(np.asarray(vals).dtype, np.number):
+                ht = ht.replace("%{" + ax + "}", "%{" + ax + ":.2f}")
+        tr.hovertemplate = ht
+    target.plotly_chart(fig, width="stretch")
+
+
 WINTER_MONTHS = (12, 1, 2, 3)   # December to March
 SEASON_COLORS = {"Winter (Dec-Mar)": "#3B6FB6", "Rest of year": ACCENT}
 
@@ -147,12 +164,44 @@ def _hide(df: pd.DataFrame, hidden_dates, hidden_ids) -> pd.DataFrame:
     return df[~drop].reset_index(drop=True)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def _owner_hikes(_key, key_id, types, start_date, max_new, schema, hidden_dates, hidden_ids):
-    """Cached for 15 minutes and shared by all visitors. `_key` (underscore) is left out of the cache key on purpose.
-    Hidden hikes are removed HERE, so they never reach a visitor's page, table, charts or 'Save my hikes' download."""
-    df, notes = gp.sync(_key, types=types, start_date=start_date, max_new=max_new)
-    return _hide(df, hidden_dates, hidden_ids), notes, time.time()
+OWNER_TTL_S = 900   # the owner's hikes are re-checked at most every 15 minutes (or when someone presses Refresh)
+
+
+@st.cache_resource
+def _owner_store() -> dict:
+    """Server-wide copy of the owner's hikes, shared by every visitor. Hidden hikes are removed before they are stored here,
+    so they never reach a visitor's page, table, charts or 'Save my hikes' download."""
+    import threading
+    return {"lock": threading.Lock(), "sig": None, "df": None, "notes": [], "t": 0.0}
+
+
+def _owner_load(cfg, schema, hidden_dates, hidden_ids, force, progress_bar):
+    """-> (hikes, notes, synced_at). Shows a progress bar while it talks to Garmin. Only one visitor syncs at a time."""
+    store = _owner_store()
+    sig = (gp._fingerprint(cfg["key"]), cfg["types"], cfg["start_date"], cfg["max_new"], schema, hidden_dates, hidden_ids)
+
+    def fresh():
+        return store["sig"] == sig and store["df"] is not None and time.time() - store["t"] < OWNER_TTL_S
+
+    if fresh() and not force:
+        return store["df"], store["notes"], store["t"]
+    progress_bar.progress(0.0, text="Contacting Garmin…")
+    with store["lock"]:
+        if fresh() and not force:   # someone else finished a sync while this visitor waited
+            return store["df"], store["notes"], store["t"]
+        force = False
+        try:
+            df, notes = gp.sync(
+                cfg["key"], types=cfg["types"], start_date=cfg["start_date"], max_new=cfg["max_new"],
+                progress=lambda n, total: progress_bar.progress(min(n / max(total, 1), 0.99),
+                                                                text=f"Downloading hike {n} of {total} from Garmin…"))
+        except gp.PersonalApiError as e:
+            if store["df"] is not None and store["sig"] == sig:   # keep showing the last good copy
+                return store["df"], store["notes"] + [f"⚠️ Couldn't refresh from Garmin: {e}"], store["t"]
+            raise
+        store.update(sig=sig, df=_hide(df, hidden_dates, hidden_ids), notes=notes, t=time.time())
+        progress_bar.progress(1.0, text="Garmin data is up to date.")
+        return store["df"], store["notes"], store["t"]
 
 
 # ------------------------------------------------------------------ header
@@ -161,6 +210,7 @@ st.title("🥾 NH 4000-Footer Pace Predictor")
 
 # ----------------------------------------------------------------- sidebar
 with st.sidebar:
+    refresh_slot = st.container()   # filled in later (only when the owner's hikes are showing)
     st.header("Your data")
     saved_up = st.file_uploader(
         "⓪ Saved hikes file (if you've been here before)", type=["csv"],
@@ -219,17 +269,17 @@ visitor_uploaded = bool(csv_up or saved_up or fit_ups or use_demo)
 owner_cfg = _owner_cfg()
 owner_df, owner_notes, owner_error, owner_synced = None, [], None, None
 if owner_cfg and not visitor_uploaded:
+    _force = bool(st.session_state.pop("force_refresh", False))
+    _bar = st.empty()
     try:
-        with st.spinner("Loading hikes from Garmin (the first load can take a minute)…"):
-            _hd = () if owner_cfg["show_hidden"] else owner_cfg["hidden_dates"]
-            _hi = () if owner_cfg["show_hidden"] else owner_cfg["hidden_ids"]
-            owner_df, owner_notes, owner_synced = _owner_hikes(
-                owner_cfg["key"], gp._fingerprint(owner_cfg["key"]), owner_cfg["types"], owner_cfg["start_date"],
-                owner_cfg["max_new"], (tuple(HIKE_COLUMNS), TRACK_VERSION), _hd, _hi)
+        _hd = () if owner_cfg["show_hidden"] else owner_cfg["hidden_dates"]
+        _hi = () if owner_cfg["show_hidden"] else owner_cfg["hidden_ids"]
+        owner_df, owner_notes, owner_synced = _owner_load(owner_cfg, (tuple(HIKE_COLUMNS), TRACK_VERSION), _hd, _hi, _force, _bar)
         if owner_df.empty:
             owner_df, owner_error = None, "Connected to Garmin, but no matching activities were found."
     except gp.PersonalApiError as e:
         owner_error = str(e)
+    _bar.empty()
 
 if csv_bytes is None and saved_up is None and owner_df is None:
     if owner_error:
@@ -288,20 +338,22 @@ for _c in HIKE_COLUMNS:  # belt and braces: never crash on a table that lacks a 
     if _c not in activities.columns:
         activities[_c] = float("nan") if _c in NUMERIC else ""
 if owner_df is not None:
-    _bc, _rc = st.columns([4, 1], vertical_alignment="center")
     _ago = max(int(time.time() - owner_synced), 0) if owner_synced else 0
-    _bc.info("**Showing selected hikes from the app owner**, pulled from their Garmin account"
-             + (f" (last synced {_ago // 60} min ago)" if _ago >= 60 else " (synced just now)")
-             + ". Upload your own files in the sidebar and they replace these. Alternatively, you can clone the repository and run it locally with your personal API.")
-    if _rc.button("🔄 Refresh Garmin data", help="Re-check Garmin for new hikes. Limited to once every 2 minutes."):
-        _st = _refresh_state()
-        _wait = REFRESH_COOLDOWN_S - (time.time() - _st["last"])
-        if _wait > 0:
-            _rc.warning(f"Refreshed recently. Try again in {int(_wait) + 1} s.")
-        else:
-            _st["last"] = time.time()
-            _owner_hikes.clear()
-            st.rerun()
+    st.info("**Showing selected hikes from the app owner**, pulled from their Garmin account"
+            + (f" (last synced {_ago // 60} min ago)" if _ago >= 60 else " (synced just now)")
+            + ". Upload your own files in the sidebar and they replace these. Alternatively, you can clone the repository and run it locally with your personal API.")
+    with refresh_slot:
+        if st.button("🔄 Refresh Garmin data", width="stretch",
+                     help="Re-check Garmin for new hikes. Limited to once every 2 minutes."):
+            _st = _refresh_state()
+            _wait = REFRESH_COOLDOWN_S - (time.time() - _st["last"])
+            if _wait > 0:
+                st.warning(f"Refreshed recently. Try again in {int(_wait) + 1} s.")
+            else:
+                _st["last"] = time.time()
+                st.session_state["force_refresh"] = True
+                st.rerun()
+        st.divider()
 for _c in NUMERIC:  # whatever the source (upload, saved file, Garmin sync), numbers must be real numbers for charts
     activities[_c] = pd.to_numeric(activities[_c], errors="coerce")
 for _c in ("start_local", "date"):
@@ -443,12 +495,12 @@ with tab1:
                 "numbers came from. Blank = only in Activities.csv (no file matched)."),
             "match": st.column_config.TextColumn("Match", help="matched = CSV row + .fit file; csv only; fit only (no CSV "
                 "row, so named by its filename); saved = restored from your saved hikes file."),
-            "distance_mi": st.column_config.NumberColumn("Miles", format="%.1f"),
-            "ascent_ft": st.column_config.NumberColumn("Climb (ft)", format="%.0f"),
+            "distance_mi": st.column_config.NumberColumn("Miles", format="%.2f"),
+            "ascent_ft": st.column_config.NumberColumn("Climb (ft)", format="%.2f"),
             "time_hr": st.column_config.NumberColumn("Hours", format="%.2f", help="Total time, start to finish, including stops."),
             "moving_hr": st.column_config.NumberColumn("Moving", format="%.2f", help="Hours spent actually moving (.fit files only)."),
             "stopped_hr": st.column_config.NumberColumn("Stopped", format="%.2f", help="Hours stopped: rests, summit time, pauses (.fit files only)."),
-            "avg_hr": st.column_config.NumberColumn("Avg HR", format="%.0f"),
+            "avg_hr": st.column_config.NumberColumn("Avg HR", format="%.2f"),
             "nh4000": st.column_config.MultiselectColumn("NH 4000 peaks", options=list(PEAKS["peak"])),
         },
     )
@@ -462,9 +514,9 @@ with tab1:
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Activities used", f"{len(hikes)} of {len(all_rows)}")
-    m2.metric("Total miles", f"{hikes['distance_mi'].sum():,.0f}")
-    m3.metric("Total climb (ft)", f"{hikes['ascent_ft'].sum():,.0f}")
-    m4.metric("Total hours", f"{hikes['time_hr'].sum():,.0f}")
+    m2.metric("Total miles", f"{hikes['distance_mi'].sum():,.2f}")
+    m3.metric("Total climb (ft)", f"{hikes['ascent_ft'].sum():,.2f}")
+    m4.metric("Total hours", f"{hikes['time_hr'].sum():,.2f}")
     # Which used activities have real data, and which still need a matching .fit/.zip?
     def _summary(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame({
@@ -480,14 +532,14 @@ with tab1:
         st.caption("Used by the model.")
         st.dataframe(_summary(hikes[has_climb]), hide_index=True, width="stretch", height=260,
                      column_config={"Date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
-                                    "Miles": st.column_config.NumberColumn("Miles", format="%.1f")})
+                                    "Miles": st.column_config.NumberColumn("Miles", format="%.2f")})
     with missing_col:
         st.markdown(f"**⚠️ No match / no climb data ({int((~has_climb).sum())})**")
         st.caption("Left out of the model. Upload each one's .zip (step ②) to fill it in, or untick *Use* above.")
         if (~has_climb).any():
             st.dataframe(_summary(hikes[~has_climb]), hide_index=True, width="stretch", height=260,
                          column_config={"Date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
-                                        "Miles": st.column_config.NumberColumn("Miles", format="%.1f")})
+                                        "Miles": st.column_config.NumberColumn("Miles", format="%.2f")})
         else:
             st.success("Every activity you're using has climb data.")
 
@@ -536,12 +588,12 @@ with tab2:
             bins = c.slider("Bins", 5, 40, 12)
             fig = px.histogram(hikes, x=ycol, nbins=bins, labels=LABELS, color_discrete_sequence=[ACCENT])
         fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=430)
-        st.plotly_chart(fig, width="stretch")
+        plot(fig)
 
 
 # ============================================================ PACE PROFILE TAB
 def _num(v, unit="", dec=0):
-    return "n/a" if pd.isna(v) else f"{v:,.{dec}f}{unit}"
+    return "n/a" if pd.isna(v) else f"{v:,.2f}{unit}"
 
 
 with tab_prof:
@@ -567,15 +619,15 @@ with tab_prof:
             hide_index=True, width="stretch", height=260,
             column_config={
                 "date": st.column_config.DateColumn("Date", format="MMM D, YYYY"), "title": "Activity",
-                "distance_mi": st.column_config.NumberColumn("Miles", format="%.1f"),
+                "distance_mi": st.column_config.NumberColumn("Miles", format="%.2f"),
                 "time_hr": st.column_config.NumberColumn("Total hr", format="%.2f"),
                 "moving_hr": st.column_config.NumberColumn("Moving hr", format="%.2f"),
-                "stopped_pct": st.column_config.NumberColumn("Stopped %", format="%.0f"),
-                "flat_pace_min_mi": st.column_config.NumberColumn("Flat pace (min/mi)", format="%.1f"),
-                "climb_rate_fthr": st.column_config.NumberColumn("Climb ft/hr (≥5%)", format="%.0f"),
-                "steep_climb_rate_fthr": st.column_config.NumberColumn("Steep ft/hr (≥15%)", format="%.0f"),
-                "descent_rate_fthr": st.column_config.NumberColumn("Descent ft/hr", format="%.0f"),
-                "steep_ascent_pct": st.column_config.NumberColumn("Climb on steep %", format="%.0f"),
+                "stopped_pct": st.column_config.NumberColumn("Stopped %", format="%.2f"),
+                "flat_pace_min_mi": st.column_config.NumberColumn("Flat pace (min/mi)", format="%.2f"),
+                "climb_rate_fthr": st.column_config.NumberColumn("Climb ft/hr (≥5%)", format="%.2f"),
+                "steep_climb_rate_fthr": st.column_config.NumberColumn("Steep ft/hr (≥15%)", format="%.2f"),
+                "descent_rate_fthr": st.column_config.NumberColumn("Descent ft/hr", format="%.2f"),
+                "steep_ascent_pct": st.column_config.NumberColumn("Climb on steep %", format="%.2f"),
             },
         )
 
@@ -584,7 +636,7 @@ with tab_prof:
         if withp.empty:
             st.info("No elevation profiles in these hikes.")
         else:
-            labels = [f"{r['date']:%b %d, %Y} · {r['title']} · {r['distance_mi']:.1f} mi" for _, r in withp.iterrows()]
+            labels = [f"{r['date']:%b %d, %Y} · {r['title']} · {r['distance_mi']:.2f} mi" for _, r in withp.iterrows()]
             pick = st.selectbox("Hike", range(len(withp)), index=len(withp) - 1, format_func=lambda i: labels[i])
             pf = profile_frame(withp.loc[pick, "profile"], stop_min_min * 60, hr_drop)
             if pf is None:
@@ -602,7 +654,7 @@ with tab_prof:
                 if metric == "Pace":
                     fig.add_trace(go.Scatter(x=pf["miles"], y=pf["pace_min_mi"], name="Pace (min/mi)",
                                              line=dict(color="#2C5AA0", width=1.5), connectgaps=False,
-                                             hovertemplate="%{y:.1f} min/mi<extra></extra>"), secondary_y=True)
+                                             hovertemplate="%{y:.2f} min/mi<extra></extra>"), secondary_y=True)
                 elif metric == "Speed":
                     fig.add_trace(go.Scatter(x=pf["miles"], y=pf["speed_mph"], name="Speed (mph)",
                                              line=dict(color="#2C5AA0", width=1.5),
@@ -617,14 +669,14 @@ with tab_prof:
                         x=slow["miles"], y=slow["altitude_ft"], mode="markers", name=f"Slow technical ({stop_min_min}+ min)",
                         marker=dict(size=(8 + slow["slow_min"] * 1.2).clip(upper=40), color="#5B7DB1", symbol="diamond",
                                     line=dict(color="white", width=1)),
-                        text=[f"slow going for about {m:.0f} min (heart rate stayed up, so not counted as a rest)" for m in slow["slow_min"]],
+                        text=[f"slow going for about {m:.2f} min (heart rate stayed up, so not counted as a rest)" for m in slow["slow_min"]],
                         hoverinfo="text+x"), secondary_y=False)
                 if len(stops):
                     fig.add_trace(go.Scatter(
                         x=stops["miles"], y=stops["altitude_ft"], mode="markers", name=f"Stops ({stop_min_min}+ min)",
                         marker=dict(size=(8 + stops["stop_min"] * 1.2).clip(upper=40), color="#E6A100",
                                     line=dict(color="white", width=1)),
-                        text=[f"stopped about {m:.0f} min" for m in stops["stop_min"]], hoverinfo="text+x"), secondary_y=False)
+                        text=[f"stopped about {m:.2f} min" for m in stops["stop_min"]], hoverinfo="text+x"), secondary_y=False)
                 lo_a, hi_a = float(pf["altitude_ft"].min()), float(pf["altitude_ft"].max())
                 fig.update_yaxes(title_text="Elevation (ft)", range=[lo_a - 150, hi_a + 400], secondary_y=False)
                 if metric == "Pace":
@@ -635,14 +687,14 @@ with tab_prof:
                     fig.update_yaxes(title_text="Heart rate (bpm)", secondary_y=True)
                 fig.update_xaxes(title_text="Miles from start")
                 fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400, legend=dict(orientation="h", y=1.12))
-                st.plotly_chart(fig, width="stretch")
+                plot(fig)
                 r = withp.loc[pick]
                 biggest = pf.loc[pf["stop_min"].idxmax()]
                 slow_hr = r.get("slow_technical_hr")
                 st.caption(
                     f"Moving {fmt_hours(r['moving_hr'])}, stopped {fmt_hours(r['stopped_hr'])} "
                     f"({_num(r['stopped_pct'], '%')} of {fmt_hours(r['time_hr'])})"
-                    + (f" · biggest stop about {biggest['stop_min']:.0f} min near mile {biggest['miles']:.1f}."
+                    + (f" · biggest stop about {biggest['stop_min']:.2f} min near mile {biggest['miles']:.2f}."
                        if biggest["stop_min"] > 0 else ".")
                     + (f" Slow technical going (counted as moving): {fmt_delta(slow_hr)}." if pd.notna(slow_hr) and slow_hr > 0 else "")
                 )
@@ -660,26 +712,26 @@ with tab_prof:
             else:
                 c1, c2 = st.columns(2)
                 f1 = px.scatter(eff, x="uphill_hr", y="climb_rate_fthr", color="season", color_discrete_map=SEASON_COLORS,
-                                hover_name="title", hover_data={"when": True, "uphill_hr": ":.0f", "climb_rate_fthr": ":.0f",
-                                                                 "efficiency": ":.1f", "season": False},
+                                hover_name="title", hover_data={"when": True, "uphill_hr": ":.2f", "climb_rate_fthr": ":.2f",
+                                                                 "efficiency": ":.2f", "season": False},
                                 labels={"uphill_hr": "Average heart rate while climbing (bpm)",
                                         "climb_rate_fthr": "Climb rate (ft/hr)", "when": "Date", "efficiency": "ft/hr per bpm"})
                 f1.update_traces(marker=dict(size=12, line=dict(color="white", width=1)))
                 f1.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=340, legend_title_text="",
                                  legend=dict(orientation="h", y=-0.28), title="Higher and to the left = fitter")
-                c1.plotly_chart(f1, width="stretch")
+                plot(f1, c1)
                 f1b = go.Figure()
                 f1b.add_trace(go.Scatter(x=eff["date"], y=eff["efficiency"], mode="lines", hoverinfo="skip", showlegend=False,
                                          line=dict(color="#B8C2BD", width=1.5)))
                 for sname, g in eff.groupby("season"):
                     f1b.add_trace(go.Scatter(x=g["date"], y=g["efficiency"], mode="markers", name=sname, text=g["title"],
                                              marker=dict(size=12, color=SEASON_COLORS[sname], line=dict(color="white", width=1)),
-                                             hovertemplate="<b>%{text}</b><br>%{x|%b %d, %Y}<br>%{y:.1f} ft/hr per bpm<extra></extra>"))
+                                             hovertemplate="<b>%{text}</b><br>%{x|%b %d, %Y}<br>%{y:.2f} ft/hr per bpm<extra></extra>"))
                 f1b.update_xaxes(title_text="Date")
-                f1b.update_yaxes(title_text="Climb rate per bpm (ft/hr per bpm)")
+                f1b.update_yaxes(title_text="Efficiency (ft/hr per bpm)")
                 f1b.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=340, legend_title_text="",
                                   legend=dict(orientation="h", y=-0.28), title="Is it improving over time?")
-                c2.plotly_chart(f1b, width="stretch")
+                plot(f1b, c2)
                 st.caption("Efficiency = your climb rate divided by your average heart rate on the uphill parts. If it rises, you are "
                            "getting more climbing out of the same effort. Heart rate also moves with heat, sleep and caffeine, and a "
                            "winter climb is slower for reasons that have nothing to do with fitness, so compare like with like "
@@ -705,14 +757,14 @@ with tab_prof:
                 summ = summ.reindex(columns=list(SEASON_COLORS))
                 summ["Difference"] = summ["Winter (Dec-Mar)"] - summ["Rest of year"]
                 st.caption(f"Medians: {n_w} winter hike(s), {n_o} others. Winter = December to March.")
-                st.dataframe(summ.round(1), width="stretch")
+                st.dataframe(summ.round(2), width="stretch")
                 pick_m = st.selectbox("Compare", cols, format_func=season_metrics.get, key="season_metric")
                 fb = px.box(trk.dropna(subset=[pick_m]), x="season", y=pick_m, color="season", color_discrete_map=SEASON_COLORS,
                             points="all", hover_name="title", category_orders={"season": list(SEASON_COLORS)},
                             labels={pick_m: season_metrics[pick_m], "season": ""})
                 fb.update_traces(marker=dict(size=9), boxmean=False)
                 fb.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=340, showlegend=False)
-                st.plotly_chart(fb, width="stretch")
+                plot(fb)
                 if min(n_w, n_o) < 5:
                     st.caption("⚠️ Fewer than 5 hikes in one group: treat differences as hints, not findings.")
 
@@ -721,7 +773,7 @@ with tab_prof:
                             labels={"distance_mi": "Distance (mi)", "stopped_pct": "Stopped (% of time)"})
             f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?",
                              legend_title_text="", legend=dict(orientation="h", y=-0.25))
-            st.plotly_chart(f2, width="stretch")
+            plot(f2)
         st.caption("A stop is a break: a stretch at or above the shortest-break setting (sidebar, default 3 minutes) where you made "
                    "almost no progress (under about 40% of your typical moving speed on that hike, over 45 seconds; climbing counts "
                    "as progress, 1 m up is worth about 8 m of flat ground, so a slow scramble isn't mistaken for standing still; the "
@@ -768,8 +820,8 @@ with tab3:
             )
             st.markdown("#### Test predictions")
             d1, d2 = st.columns(2)
-            v1 = d1.number_input(LABELS[in1], value=float(round(model_df[in1].median(), 1)), min_value=0.0, key=f"v1-{in1}")
-            v2 = d2.number_input(LABELS[in2], value=float(round(model_df[in2].median(), 1)), min_value=0.0, key=f"v2-{in2}")
+            v1 = d1.number_input(LABELS[in1], value=float(round(model_df[in1].median(), 2)), min_value=0.0, key=f"v1-{in1}")
+            v2 = d2.number_input(LABELS[in2], value=float(round(model_df[in2].median(), 2)), min_value=0.0, key=f"v2-{in2}")
             pred = predict(fit, {in1: v1, in2: v2})
             if target == TARGET:
                 st.success(f"Predicted **{LABELS[target].replace(' (hr)', '')}: {fmt_hours(pred)}**")
@@ -807,7 +859,7 @@ with tab3:
             f2.update_xaxes(**xax)
             f2.update_yaxes(**yax)
             f2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=380, hoverlabel=dict(font_size=14))
-            st.plotly_chart(f2, width="stretch")
+            plot(f2)
             st.caption("Dots on the dotted line = perfect predictions. Hover a dot to see which hike it is.")
             st.caption(
                 f"**Limitations:** this model is fit on {fit['n']} activit{'y' if fit['n'] == 1 else 'ies'}, a small sample, so a single unusual day "
@@ -898,7 +950,7 @@ with tab4:
         tbl = tbl[["peak", "elevation_ft", "route_miles", "route_gain_ft", "predicted_time", "predicted_hours", "hiked"]]
         st.dataframe(tbl.sort_values("predicted_hours"), hide_index=True, width="stretch",
                      column_config={"predicted_time": "Predicted time",
-                                    "predicted_hours": st.column_config.NumberColumn("Hours (sortable)", format="%.1f"),
+                                    "predicted_hours": st.column_config.NumberColumn("Hours (sortable)", format="%.2f"),
                                     "hiked": st.column_config.CheckboxColumn("Hiked?"),
                                     "route_miles": "Miles", "route_gain_ft": "Gain (ft)", "elevation_ft": "Summit (ft)"})
     st.caption(
