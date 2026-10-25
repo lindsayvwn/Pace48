@@ -113,6 +113,7 @@ LOADER_HTML = """
 
 ALIASES_CSV = HERE / "data" / "peak_aliases.csv"
 OWNER_TAGS_CSV = HERE / "data" / "owner_tags.csv"
+EXCLUSIONS_CSV = HERE / "data" / "peak_exclusions.csv"
 _FILLER = {"mt", "mount", "mountain", "mtn"}
 FUZZY_MIN_LEN, FUZZY_RATIO = 6, 0.86
 
@@ -151,13 +152,39 @@ def _alias_table() -> list[tuple[list[str], list[str]]]:
     return out
 
 
+@st.cache_data(show_spinner=False)
+def _exclusions() -> dict[str, list[list[str]]]:
+    """data/peak_exclusions.csv: 'phrase,peak'. Trail and place names that contain a peak's name but aren't that peak
+    (Lincoln Woods, Lincoln Brook, Zealand Falls...). The phrase is ignored when matching that peak."""
+    try:
+        df = pd.read_csv(EXCLUSIONS_CSV, dtype=str, keep_default_na=False)
+    except Exception:
+        return {}
+    out: dict[str, list[list[str]]] = {}
+    for _, r in df.iterrows():
+        if r["phrase"].strip() and r["peak"].strip():
+            out.setdefault(r["peak"].strip(), []).append(_norm(r["phrase"]))
+    return out
+
+
+def _without_phrases(words: list[str], phrases: list[list[str]]) -> list[str]:
+    for ph in phrases:
+        n, i = len(ph), 0
+        while ph and i <= len(words) - n:
+            if words[i:i + n] == ph:
+                words = words[:i] + ["_"] + words[i + n:]
+            i += 1
+    return words
+
+
 def suggest_peaks(title: str) -> list[str]:
     """Pre-fill peak tags from the activity title (user can edit): exact or near-spelling matches of the 48 names,
     plus the shorthand in data/peak_aliases.csv ('Wildcat A', 'Tripyramid', 'Franconia Ridge'...)."""
     words = _norm(title)
     found: list[str] = []
+    excl = _exclusions()
     for p in PEAKS["peak"]:
-        if _phrase_in(words, _norm(p)):
+        if _phrase_in(_without_phrases(words, excl.get(p, [])), _norm(p)):
             found.append(p)
     for alias_words, peaks in _alias_table():
         if _phrase_in(words, alias_words):
