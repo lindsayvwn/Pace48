@@ -1,0 +1,9 @@
+# Secrets and private data: never commit
+.streamlit/secrets.toml
+.cache/
+*.fit
+Activities.csv
+my_pace48_hikes.csv
+my_nh4000_tags.csv
+__pycache__/
+.vs/

@@ -6,3 +6,4 @@ plotly>=5.20
 statsmodels>=0.14
 fitdecode>=0.10
 openpyxl>=3.1
+requests>=2.31

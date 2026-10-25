@@ -5,6 +5,7 @@ the app learns YOUR pace and predicts how long any of the 48 peaks will take you
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+import garmin_personal as gp
 from garmin_io import HIKE_COLUMNS, NUMERIC, activity_key, combine_saved, load_activities
 from tags_io import hikes_from_csv, hikes_to_csv, tags_from_csv, tags_to_csv
 from model import (FEATURES, MIN_HIKES_FOR_MOVING_MODEL, MIN_HIKES_FOR_REGRESSION, TARGET, MovingStopModel, PaceModel,
@@ -81,6 +83,29 @@ def suggest_peaks(title: str) -> list[str]:
     return found
 
 
+# ------------------------------------------------------- owner's default data (Garmin Personal API)
+def _owner_cfg() -> dict | None:
+    """The app owner's personal-API settings from secrets.toml ([garmin_personal]) or the GARMIN_PERSONAL_API_KEY env var.
+    None = not configured, so the app behaves exactly as a plain upload app. The key is never shown or sent to visitors."""
+    try:
+        g = dict(st.secrets.get("garmin_personal", {}))
+    except Exception:
+        g = {}
+    key = str(g.get("api_key") or os.environ.get(gp.KEY_ENV, "")).strip()
+    if not key or str(g.get("enabled", True)).strip().lower() in ("false", "0", "no"):
+        return None
+    types = g.get("activity_types", gp.DEFAULT_TYPES)
+    return {"key": key, "types": tuple([types] if isinstance(types, str) else types),
+            "start_date": str(g["start_date"]) if g.get("start_date") else None,
+            "max_new": int(g.get("max_new_per_load", 40))}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _owner_hikes(_key, key_id, types, start_date, max_new, schema):
+    """Cached for 15 minutes and shared by all visitors. `_key` (underscore) is left out of the cache key on purpose."""
+    return gp.sync(_key, types=types, start_date=start_date, max_new=max_new)
+
+
 # ------------------------------------------------------------------ header
 st.markdown(HIDE_DEFAULT_STATUS, unsafe_allow_html=True)
 st.title("🥾 NH 4000-Footer Pace Predictor")
@@ -130,7 +155,24 @@ with st.sidebar:
 csv_bytes = csv_up.getvalue() if csv_up else (DEMO_CSV.read_bytes() if use_demo and not saved_up else None)
 fit_files = [(f.name, f.getvalue()) for f in (fit_ups or [])]
 
-if csv_bytes is None and saved_up is None:
+# Default: the owner's hikes (if a personal API key is configured). ANY upload by the visitor replaces them.
+visitor_uploaded = bool(csv_up or saved_up or fit_ups or use_demo)
+owner_cfg = _owner_cfg()
+owner_df, owner_notes, owner_error = None, [], None
+if owner_cfg and not visitor_uploaded:
+    try:
+        with st.spinner("Loading hikes from Garmin (the first load can take a minute)…"):
+            owner_df, owner_notes = _owner_hikes(
+                owner_cfg["key"], gp._fingerprint(owner_cfg["key"]), owner_cfg["types"], owner_cfg["start_date"],
+                owner_cfg["max_new"], (tuple(HIKE_COLUMNS), TRACK_VERSION))
+        if owner_df.empty:
+            owner_df, owner_error = None, "Connected to Garmin, but no matching activities were found."
+    except gp.PersonalApiError as e:
+        owner_error = str(e)
+
+if csv_bytes is None and saved_up is None and owner_df is None:
+    if owner_error:
+        st.error(f"Couldn't load the default hikes. {owner_error}")
     st.markdown("### 👈 Start by uploading your Garmin Activities.csv")
     st.markdown(
         "1. Upload **Activities.csv** (your titles) and the **.zip** files for the hikes you want (real climb and time)  \n"
@@ -152,7 +194,9 @@ def _load(csv_b, fit_tuple, du, eu, schema):
 loader = st.empty()
 loader.markdown(LOADER_HTML, unsafe_allow_html=True)
 try:
-    if csv_bytes is not None:
+    if owner_df is not None:
+        activities, notes = owner_df.copy(), list(owner_notes)
+    elif csv_bytes is not None:
         activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit, (tuple(HIKE_COLUMNS), TRACK_VERSION))
     else:
         activities, notes = pd.DataFrame(columns=HIKE_COLUMNS), []
@@ -182,6 +226,9 @@ if saved_df is not None:
 for _c in HIKE_COLUMNS:  # belt and braces: never crash on a table that lacks a column
     if _c not in activities.columns:
         activities[_c] = float("nan") if _c in NUMERIC else ""
+if owner_df is not None:
+    st.info("**Showing the app owner's hikes**, pulled from their Garmin account. Upload your own files in the sidebar "
+            "and they replace these.")
 for n in notes:
     (st.info if n.startswith("ℹ️") else st.warning)(n)
 if activities.empty:
@@ -196,7 +243,7 @@ if fit_files:
         + (f" · {counts.get('fit only', 0)} .fit file(s) with no CSV row (named by filename)" if counts.get("fit only", 0) else "")
         + (f" · {counts.get('csv only', 0)} CSV rows with no .fit file (climb may be missing)" if counts.get("csv only", 0) else "")
     )
-elif saved_df is None:
+elif saved_df is None and owner_df is None:
     st.warning("No .fit/.zip files uploaded: using the CSV's own numbers, and Garmin often leaves climb blank there. "
                "Upload the .zip files for best results.")
 
@@ -274,7 +321,8 @@ with tab5:
         "features (and the moving + stops model) only use hikes whose .zip/.fit you uploaded.\n"
         "- **Total time includes breaks.** Time is measured start to finish, including rests and pauses, because that is "
         "what you need for planning a day.\n"
-        "- **Garmin data only.** You upload files; there's no direct Garmin connection yet."
+        "- **Garmin data only.** Visitors upload files. The hikes shown by default come from the app owner's own Garmin "
+        "account, and only the owner can connect one."
     )
     st.subheader("Roadmap")
     st.markdown(

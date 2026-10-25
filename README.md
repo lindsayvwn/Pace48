@@ -22,6 +22,22 @@ This project focuses on creating a streamlit app that will ingest your Garmin hi
 
 With fewer than 5 hikes the app falls back to the Naismith rule scaled to your pace and says so on screen.
 
+## Default dashboard from your own Garmin (optional, owner only)
+Want the app to open on *your* hikes instead of an empty upload page? Add a Garmin **Personal API** key:
+
+1. Create a key at <https://connect.garmin.com/app/settings/personalApiToken> (shown once; it expires, so you'll renew it).
+2. Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` (or paste it into Streamlit Cloud's *Secrets*) and put the key in.
+   You can also set the `GARMIN_PERSONAL_API_KEY` environment variable instead.
+3. Run the app. With no uploads it shows your hikes; **anything a visitor uploads replaces them**, and visitors never see or use your key.
+
+How it works: `garmin_personal.py` exchanges the key for a token, lists your activities, downloads each activity's original
+`.zip`, and runs it through the same reader as an upload, so you get the same moving/stopped time, paces and profiles.
+Parsed hikes are cached in `.cache/` (gitignored) so later loads only download new activities.
+
+Things to know: everyone who opens your deployed app sees your default hikes (dates, titles, heart rate, elevation profiles),
+so turn it off with `enabled = false`, or don't set a key, if that's not what you want. Check Garmin's terms for the Personal
+API before exposing your data on a public site. On hosts with a temporary disk the cache is rebuilt after each restart.
+
 ## Privacy
 - Your Garmin data is **never committed** (`.gitignore` blocks `.fit` and `Activities.csv`) and is processed in memory only.
 - From `.fit` files only distance, climb, time, date, heart-rate summaries and a small (~80 point) elevation/heart-rate profile are kept: no GPS coordinates, name or weight.
@@ -39,4 +55,4 @@ streamlit run app.py
 ```
 
 ## Files
-`app.py` UI · `garmin_io.py` .fit/CSV parsing, matching, cleaning · `tags_io.py` save/restore tags · `track_features.py` per-hike moving/stopped, grade-based paces and profile · `model.py` features, regression, moving+stops model, fallback
+`app.py` UI · `garmin_io.py` .fit/CSV parsing, matching, cleaning · `tags_io.py` save/restore tags · `garmin_personal.py` optional owner dashboard via Garmin Personal API · `track_features.py` per-hike moving/stopped, grade-based paces and profile · `model.py` features, regression, moving+stops model, fallback
