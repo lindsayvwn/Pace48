@@ -26,7 +26,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from garmin_io import HIKE_COLUMNS, FT_PER_M, M_PER_MILE, merge_sources, read_fit_uploads
+from garmin_io import HIKE_COLUMNS, FT_PER_M, M_PER_MILE, NUMERIC, merge_sources, read_fit_uploads
 from tags_io import hikes_from_csv, hikes_to_csv
 from track_features import TRACK_NUMERIC, TRACK_VERSION, profile_version
 
@@ -168,6 +168,18 @@ def summaries_to_df(items: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _typed(df: pd.DataFrame) -> pd.DataFrame:
+    """Real number/date dtypes. Concatenating with an empty frame leaves columns as generic objects, which charts reject."""
+    df = df.copy()
+    for c in NUMERIC:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in ("start_local", "date"):
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ("title", "match", "source_file", "activity_type", "profile"):
+        df[c] = df[c].fillna("").astype(str)
+    return df
+
+
 def _read_cache() -> pd.DataFrame:
     try:
         df = hikes_from_csv(CACHE_FILE.read_bytes())
@@ -229,4 +241,4 @@ def sync(api_key: str, *, types=DEFAULT_TYPES, start_date: str | None = None, ma
         allrows = cached
     if left:
         notes.append(f"ℹ️ Loaded {len(batch)} new hikes from Garmin; {left} more will load the next time the page refreshes.")
-    return allrows.sort_values("start_local").reset_index(drop=True), notes
+    return _typed(allrows).sort_values("start_local").reset_index(drop=True), notes

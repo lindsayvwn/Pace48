@@ -229,6 +229,10 @@ for _c in HIKE_COLUMNS:  # belt and braces: never crash on a table that lacks a 
 if owner_df is not None:
     st.info("**Showing the app owner's hikes**, pulled from their Garmin account. Upload your own files in the sidebar "
             "and they replace these.")
+for _c in NUMERIC:  # whatever the source (upload, saved file, Garmin sync), numbers must be real numbers for charts
+    activities[_c] = pd.to_numeric(activities[_c], errors="coerce")
+for _c in ("start_local", "date"):
+    activities[_c] = pd.to_datetime(activities[_c], errors="coerce")
 for n in notes:
     (st.info if n.startswith("ℹ️") else st.warning)(n)
 if activities.empty:
