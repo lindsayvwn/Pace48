@@ -11,11 +11,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
-from garmin_io import HIKE_COLUMNS, activity_key, combine_saved, load_activities
+from garmin_io import HIKE_COLUMNS, NUMERIC, activity_key, combine_saved, load_activities
 from tags_io import hikes_from_csv, hikes_to_csv, tags_from_csv, tags_to_csv
-from model import FEATURES, MIN_HIKES_FOR_REGRESSION, TARGET, PaceModel, fit_regression, predict
+from model import (FEATURES, MIN_HIKES_FOR_MOVING_MODEL, MIN_HIKES_FOR_REGRESSION, TARGET, MovingStopModel, PaceModel,
+                   fit_regression, predict, simple_loo_mae)
+from track_features import profile_frame
 
 HERE = Path(__file__).parent
 PEAKS = pd.read_csv(HERE / "data" / "nh4000_peaks.csv")
@@ -28,6 +32,10 @@ LABELS = {
     "distance_mi": "Distance (mi)", "ascent_ft": "Elevation gain (ft)", "descent_ft": "Elevation loss (ft)",
     "time_hr": "Total time (hr)", "avg_hr": "Avg heart rate (bpm)", "max_hr": "Max heart rate (bpm)",
     "calories": "Calories",
+    "moving_hr": "Moving time (hr)", "stopped_hr": "Stopped time (hr)", "stopped_pct": "Stopped (% of total time)",
+    "flat_pace_min_mi": "Flat-ground pace (min/mi)", "climb_rate_fthr": "Climb rate on uphill ≥5% (ft/hr)",
+    "steep_climb_rate_fthr": "Climb rate on steep ≥15% (ft/hr)", "descent_rate_fthr": "Descent rate on downhill ≥5% (ft/hr)",
+    "steep_ascent_pct": "Share of climb on steep ≥15% (%)",
 }
 
 
@@ -110,7 +118,7 @@ with st.sidebar:
         )
     st.caption(
         "🔒 Files are read in memory for this session only. From .fit files the app keeps just distance, "
-        "climb, time, date and heart-rate summaries: **no GPS, name or weight**. Nothing is saved on a server."
+        "climb, time, date, heart-rate summaries and a small elevation/heart-rate profile: **no GPS, name or weight**. Nothing is saved on a server."
     )
     st.caption(
         "Why no Garmin login? Garmin only allows account connections for approved companies, and asking for "
@@ -162,7 +170,7 @@ if saved_df is not None:
     st.caption(f"Loaded **{n_before} saved hikes**; {len(activities) - n_before} new from this visit's uploads.")
 for _c in HIKE_COLUMNS:  # belt and braces: never crash on a table that lacks a column
     if _c not in activities.columns:
-        activities[_c] = ""
+        activities[_c] = float("nan") if _c in NUMERIC else ""
 for n in notes:
     st.warning(n)
 if activities.empty:
@@ -189,6 +197,7 @@ chosen_types = st.sidebar.multiselect(
          "so mixing types can make predictions too optimistic.",
 )
 all_rows = activities[activities["activity_type"].isin(chosen_types)].reset_index(drop=True)
+all_rows["stopped_pct"] = 100 * all_rows["stopped_hr"] / all_rows["time_hr"].where(all_rows["time_hr"] > 0)
 if all_rows.empty:
     st.error("No activities of the selected types.")
     st.stop()
@@ -227,9 +236,9 @@ for _, r in all_rows.iterrows():
     entry.update(date=f"{r['date']:%Y-%m-%d}" if pd.notna(r["date"]) else "", title=r["title"],
                  distance_mi=round(float(r["distance_mi"]), 2) if pd.notna(r["distance_mi"]) else "")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tab1, tab2, tab3, tab4, tab_prof, tab5 = st.tabs(
     ["① Preview, tag & exclude", "② Explore", "③ Build a model", "④ Predict an NH 4000-footer",
-     "Limitations & roadmap"]
+     "Your pace profile", "Limitations & roadmap"]
 )
 
 # ============================================================ TAB 5 (drawn first so it shows even if a later step stops)
@@ -250,6 +259,10 @@ with tab5:
         "scaled to your pace, which is rougher.\n"
         "- **The time range is rough.** The 80% range is based on how far off the model is on your own hikes, so a "
         "small or very varied history makes it less trustworthy.\n"
+        "- **Stops and steep-section pace need .fit files.** Activities.csv alone has no second-by-second data, so those "
+        "features (and the moving + stops model) only use hikes whose .zip/.fit you uploaded.\n"
+        "- **Total time includes breaks.** Time is measured start to finish, including rests and pauses, because that is "
+        "what you need for planning a day.\n"
         "- **Garmin data only.** You upload files; there's no direct Garmin connection yet."
     )
     st.subheader("Roadmap")
@@ -270,7 +283,8 @@ with tab1:
             "date": all_rows["date"], "title": all_rows["title"], "source_file": all_rows["source_file"],
             "match": all_rows["match"], "activity_type": all_rows["activity_type"],
             "distance_mi": all_rows["distance_mi"], "ascent_ft": all_rows["ascent_ft"],
-            "time_hr": all_rows["time_hr"], "avg_hr": all_rows["avg_hr"],
+            "time_hr": all_rows["time_hr"], "moving_hr": all_rows["moving_hr"], "stopped_hr": all_rows["stopped_hr"],
+            "avg_hr": all_rows["avg_hr"],
             "nh4000": [tags[k]["peaks"] for k in all_rows["key"]],
         })
     st.markdown(
@@ -280,7 +294,8 @@ with tab1:
     edited = st.data_editor(
         st.session_state[base_key],
         key=editor_key, hide_index=True, width="stretch",
-        disabled=["date", "title", "source_file", "match", "activity_type", "distance_mi", "ascent_ft", "time_hr", "avg_hr"],
+        disabled=["date", "title", "source_file", "match", "activity_type", "distance_mi", "ascent_ft", "time_hr",
+                  "moving_hr", "stopped_hr", "avg_hr"],
         column_config={
             "include": st.column_config.CheckboxColumn("Use", default=True),
             "date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
@@ -291,7 +306,9 @@ with tab1:
                 "row, so named by its filename); saved = restored from your saved hikes file."),
             "distance_mi": st.column_config.NumberColumn("Miles", format="%.1f"),
             "ascent_ft": st.column_config.NumberColumn("Climb (ft)", format="%.0f"),
-            "time_hr": st.column_config.NumberColumn("Hours", format="%.2f"),
+            "time_hr": st.column_config.NumberColumn("Hours", format="%.2f", help="Total time, start to finish, including stops."),
+            "moving_hr": st.column_config.NumberColumn("Moving", format="%.2f", help="Hours spent actually moving (.fit files only)."),
+            "stopped_hr": st.column_config.NumberColumn("Stopped", format="%.2f", help="Hours stopped: rests, summit time, pauses (.fit files only)."),
             "avg_hr": st.column_config.NumberColumn("Avg HR", format="%.0f"),
             "nh4000": st.column_config.MultiselectColumn("NH 4000 peaks", options=list(PEAKS["peak"])),
         },
@@ -382,6 +399,107 @@ with tab2:
         fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=430)
         st.plotly_chart(fig, width="stretch")
 
+
+# ============================================================ PACE PROFILE TAB
+def _num(v, unit="", dec=0):
+    return "n/a" if pd.isna(v) else f"{v:,.{dec}f}{unit}"
+
+
+with tab_prof:
+    st.subheader("Your pace profile")
+    trk = hikes.dropna(subset=["moving_hr"]).reset_index(drop=True)
+    if trk.empty:
+        st.info("This tab needs the .zip/.fit files for your hikes, not just Activities.csv. They carry the second-by-second "
+                "data behind moving vs stopped time, pace on steep sections and the elevation and heart-rate profiles.")
+    else:
+        st.caption(f"Based on {len(trk)} hike(s) with track data. Medians across hikes:")
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Stopped", _num(trk["stopped_pct"].median(), "%"), help="Share of your total time spent stopped.")
+        k2.metric("Flat-ground pace", _num(trk["flat_pace_min_mi"].median(), " min/mi", 1))
+        k3.metric("Climb rate (uphill ≥5%)", _num(trk["climb_rate_fthr"].median(), " ft/hr"),
+                  help="Vertical feet gained per hour of moving time on uphill sections.")
+        k4.metric("Climb rate (steep ≥15%)", _num(trk["steep_climb_rate_fthr"].median(), " ft/hr"))
+        k5.metric("Descent rate (≥5%)", _num(trk["descent_rate_fthr"].median(), " ft/hr"))
+
+        st.markdown("**Each hike**")
+        st.dataframe(
+            trk[["date", "title", "distance_mi", "time_hr", "moving_hr", "stopped_pct", "flat_pace_min_mi",
+                 "climb_rate_fthr", "steep_climb_rate_fthr", "descent_rate_fthr", "steep_ascent_pct"]],
+            hide_index=True, width="stretch", height=260,
+            column_config={
+                "date": st.column_config.DateColumn("Date", format="MMM D, YYYY"), "title": "Activity",
+                "distance_mi": st.column_config.NumberColumn("Miles", format="%.1f"),
+                "time_hr": st.column_config.NumberColumn("Total hr", format="%.2f"),
+                "moving_hr": st.column_config.NumberColumn("Moving hr", format="%.2f"),
+                "stopped_pct": st.column_config.NumberColumn("Stopped %", format="%.0f"),
+                "flat_pace_min_mi": st.column_config.NumberColumn("Flat pace (min/mi)", format="%.1f"),
+                "climb_rate_fthr": st.column_config.NumberColumn("Climb ft/hr (≥5%)", format="%.0f"),
+                "steep_climb_rate_fthr": st.column_config.NumberColumn("Steep ft/hr (≥15%)", format="%.0f"),
+                "descent_rate_fthr": st.column_config.NumberColumn("Descent ft/hr", format="%.0f"),
+                "steep_ascent_pct": st.column_config.NumberColumn("Climb on steep %", format="%.0f"),
+            },
+        )
+
+        st.markdown("**Elevation, heart rate and stops along one hike**")
+        withp = trk[trk["profile"].astype(str).str.len() > 2].reset_index(drop=True)
+        if withp.empty:
+            st.info("No elevation profiles in these hikes.")
+        else:
+            labels = [f"{r['date']:%b %d, %Y} · {r['title']} · {r['distance_mi']:.1f} mi" for _, r in withp.iterrows()]
+            pick = st.selectbox("Hike", range(len(withp)), index=len(withp) - 1, format_func=lambda i: labels[i])
+            pf = profile_frame(withp.loc[pick, "profile"])
+            if pf is None:
+                st.warning("Couldn't read this hike's profile.")
+            else:
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+                fig.add_trace(go.Scatter(x=pf["miles"], y=pf["altitude_ft"], name="Elevation (ft)", fill="tozeroy",
+                                         line=dict(color=ACCENT), fillcolor="rgba(46,111,87,0.25)"), secondary_y=False)
+                fig.add_trace(go.Scatter(x=pf["miles"], y=pf["heart_rate"], name="Heart rate (bpm)",
+                                         line=dict(color="#C0392B", width=1.5)), secondary_y=True)
+                stops = pf[pf["stop_min"] >= 2]
+                if len(stops):
+                    fig.add_trace(go.Scatter(
+                        x=stops["miles"], y=stops["altitude_ft"], mode="markers", name="Stops (≥2 min)",
+                        marker=dict(size=(8 + stops["stop_min"] * 1.2).clip(upper=40), color="#E6A100",
+                                    line=dict(color="white", width=1)),
+                        text=[f"stopped about {m:.0f} min" for m in stops["stop_min"]], hoverinfo="text+x"), secondary_y=False)
+                lo_a, hi_a = float(pf["altitude_ft"].min()), float(pf["altitude_ft"].max())
+                fig.update_yaxes(title_text="Elevation (ft)", range=[lo_a - 150, hi_a + 150], secondary_y=False)
+                fig.update_yaxes(title_text="Heart rate (bpm)", secondary_y=True)
+                fig.update_xaxes(title_text="Miles from start")
+                fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400, legend=dict(orientation="h", y=1.12))
+                st.plotly_chart(fig, width="stretch")
+                r = withp.loc[pick]
+                biggest = pf.loc[pf["stop_min"].idxmax()]
+                st.caption(
+                    f"Moving {fmt_hours(r['moving_hr'])}, stopped {fmt_hours(r['stopped_hr'])} "
+                    f"({_num(r['stopped_pct'], '%')} of {fmt_hours(r['time_hr'])})"
+                    + (f" · biggest stop about {biggest['stop_min']:.0f} min near mile {biggest['miles']:.1f}."
+                       if biggest["stop_min"] >= 2 else ".")
+                )
+
+        if len(trk) >= 2:
+            c1, c2 = st.columns(2)
+            rates = trk.sort_values("date").melt(id_vars=["date", "title"],
+                                                 value_vars=["climb_rate_fthr", "steep_climb_rate_fthr"],
+                                                 var_name="measure", value_name="ft_per_hr").dropna(subset=["ft_per_hr"])
+            if len(rates):
+                rates["measure"] = rates["measure"].map(LABELS)
+                f1 = px.line(rates, x="date", y="ft_per_hr", color="measure", markers=True, hover_name="title",
+                             labels={"ft_per_hr": "Feet climbed per hour", "date": "Date", "measure": ""},
+                             color_discrete_sequence=[ACCENT, "#C0392B"])
+                f1.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Is your climbing getting faster?",
+                                 legend=dict(orientation="h", y=-0.25))
+                c1.plotly_chart(f1, width="stretch")
+            f2 = px.scatter(trk, x="distance_mi", y="stopped_pct", hover_name="title", size="time_hr",
+                            labels={"distance_mi": "Distance (mi)", "stopped_pct": "Stopped (% of time)"},
+                            color_discrete_sequence=[ACCENT])
+            f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?")
+            c2.plotly_chart(f2, width="stretch")
+        st.caption("Moving = speed above about 0.7 mph. Grade is measured over about 100 m of trail from smoothed barometric "
+                   "altitude, so short scrambles are averaged out. Peak predictions use distance and total climb because "
+                   "the reference routes don't include steepness data yet.")
+
 # ============================================================ TAB 3
 with tab3:
     st.subheader("Fit a linear regression: two inputs → one target")
@@ -397,44 +515,78 @@ with tab3:
         target = c.selectbox("Target to predict", tg_opts, format_func=LABELS.get,
                              index=tg_opts.index(TARGET) if TARGET in tg_opts else 0)
         feats = [in1, in2]  # same names + order used to train AND predict
-        fit = fit_regression(hikes, feats, target)
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Activities used", fit["n"])
-        k2.metric("R²", f"{fit['r2']:.2f}", help="1.0 = perfect fit on your own data.")
-        is_time = target == TARGET
-        err = (lambda v: fmt_delta(v)) if is_time else (lambda v: f"{v:.2f}")
-        k3.metric("Typical error (RMSE)", err(fit["rmse"]))
-        k4.metric("Leave-one-out error", "n/a (need 6+)" if fit["loo_mae"] is None else err(fit["loo_mae"]),
-                  help="Average miss when each activity is predicted from all the others — more honest than R².")
-        coefs = fit["model"].coef_
-        st.caption(
-            f"**{LABELS[target]}** ≈ {fit['model'].intercept_:.2f} + {coefs[0]:.4g} × {LABELS[in1]} "
-            f"+ {coefs[1]:.4g} × {LABELS[in2]}"
-        )
-        st.markdown("**Try it — type in values:**")
-        d1, d2 = st.columns(2)
-        v1 = d1.number_input(LABELS[in1], value=float(round(model_df[in1].median(), 1)), min_value=0.0, key=f"v1-{in1}")
-        v2 = d2.number_input(LABELS[in2], value=float(round(model_df[in2].median(), 1)), min_value=0.0, key=f"v2-{in2}")
-        pred = predict(fit, {in1: v1, in2: v2})
-        if target == TARGET:
-            st.success(f"Predicted **{LABELS[target].replace(' (hr)', '')}: {fmt_hours(pred)}**")
+        usable = hikes[feats + [target]].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(usable) < 3:
+            st.warning(f"Only {len(usable)} hike(s) have all three of these values (the stops and steep-section numbers "
+                       "need .fit files). Pick other columns or upload more .fit/.zip files.")
         else:
-            st.success(f"Predicted **{LABELS[target]}: {pred:.2f}**")
-        tmp = model_df[feats + [target]].dropna().copy()
-        tmp["predicted"] = fit["model"].predict(tmp[feats])
-        f2 = px.scatter(tmp, x="predicted", y=target, labels={"predicted": f"Predicted {LABELS[target]}", target: f"Actual {LABELS[target]}"},
-                        color_discrete_sequence=[ACCENT])
-        lo, hi = float(tmp[[target, "predicted"]].min().min()), float(tmp[[target, "predicted"]].max().max())
-        f2.add_shape(type="line", x0=lo, y0=lo, x1=hi, y1=hi, line=dict(dash="dot", color="gray"))
-        f2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=360)
-        st.plotly_chart(f2, width="stretch")
-        st.caption("Dots on the dotted line = perfect predictions.")
+            fit = fit_regression(hikes, feats, target)
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Activities used", fit["n"])
+            k2.metric("R²", f"{fit['r2']:.2f}", help="1.0 = perfect fit on your own data.")
+            is_time = target == TARGET
+            err = (lambda v: fmt_delta(v)) if is_time else (lambda v: f"{v:.2f}")
+            k3.metric("Typical error (RMSE)", err(fit["rmse"]))
+            k4.metric("Leave-one-out error", "n/a (need 6+)" if fit["loo_mae"] is None else err(fit["loo_mae"]),
+                      help="Average miss when each activity is predicted from all the others — more honest than R².")
+            coefs = fit["model"].coef_
+            st.caption(
+                f"**{LABELS[target]}** ≈ {fit['model'].intercept_:.2f} + {coefs[0]:.4g} × {LABELS[in1]} "
+                f"+ {coefs[1]:.4g} × {LABELS[in2]}"
+            )
+            st.markdown("**Try it — type in values:**")
+            d1, d2 = st.columns(2)
+            v1 = d1.number_input(LABELS[in1], value=float(round(model_df[in1].median(), 1)), min_value=0.0, key=f"v1-{in1}")
+            v2 = d2.number_input(LABELS[in2], value=float(round(model_df[in2].median(), 1)), min_value=0.0, key=f"v2-{in2}")
+            pred = predict(fit, {in1: v1, in2: v2})
+            if target == TARGET:
+                st.success(f"Predicted **{LABELS[target].replace(' (hr)', '')}: {fmt_hours(pred)}**")
+            else:
+                st.success(f"Predicted **{LABELS[target]}: {pred:.2f}**")
+            tmp = model_df[feats + [target]].dropna().copy()
+            tmp["predicted"] = fit["model"].predict(tmp[feats])
+            f2 = px.scatter(tmp, x="predicted", y=target, labels={"predicted": f"Predicted {LABELS[target]}", target: f"Actual {LABELS[target]}"},
+                            color_discrete_sequence=[ACCENT])
+            lo, hi = float(tmp[[target, "predicted"]].min().min()), float(tmp[[target, "predicted"]].max().max())
+            f2.add_shape(type="line", x0=lo, y0=lo, x1=hi, y1=hi, line=dict(dash="dot", color="gray"))
+            f2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=360)
+            st.plotly_chart(f2, width="stretch")
+            st.caption("Dots on the dotted line = perfect predictions.")
 
 # ============================================================ TAB 4
 with tab4:
     st.subheader("How long will an NH 4000-footer take you?")
-    pm = PaceModel(model_df)
-    if pm.n == 0:
+    pm_simple = PaceModel(model_df)
+    pm_ms, n_track = MovingStopModel.try_build(hikes)
+    pm = pm_simple
+    if pm_ms is None:
+        st.caption(f"The moving + stops model needs {MIN_HIKES_FOR_MOVING_MODEL}+ hikes with .fit track data "
+                   f"(you have {n_track}). Until then the simple model is used.")
+    else:
+        simple_mae = simple_loo_mae(hikes.dropna(subset=["moving_hr", "stopped_hr"]))
+        ms_better = pm_ms.loo_mae is not None and simple_mae is not None and pm_ms.loo_mae <= simple_mae
+        choice = st.radio(
+            "Model", ["Simple: distance + climb → total time", "Moving + stops: uses your track data"],
+            index=1 if ms_better else 0, horizontal=True,
+            help="Moving + stops predicts the time you'll be moving, then adds your typical stopped time.",
+        )
+        if choice.startswith("Moving"):
+            pm = pm_ms
+        if pm_ms.loo_mae is not None and simple_mae is not None:
+            st.caption(
+                f"On your {pm_ms.n} hikes with track data, a leave-one-out test misses by "
+                f"**{fmt_delta(simple_mae)}** (simple) vs **{fmt_delta(pm_ms.loo_mae)}** (moving + stops)"
+                + (" · moving + stops is selected because it misses by less or the same." if ms_better and pm is pm_ms else
+                   " · the simple model misses by less, so it's the default." if not ms_better else ".")
+            )
+        else:
+            st.caption("Not enough hikes with track data yet to compare the two models fairly (needs 6+).")
+    if pm.kind == "moving+stops":
+        st.caption(
+            f"Moving time from a regression on **{pm.n} hikes** (R² {pm.fit['r2']:.2f}) plus your typical stopped time "
+            f"(**{pm.stop_ratio:.0%}** of moving time) · typical error ±{fmt_delta(pm.spread)}."
+        )
+    elif pm.n == 0:
         st.warning("No complete hikes yet, so I'm using the standard Naismith rule (3 mph + 1 h per 2,000 ft).")
     elif pm.kind == "naismith":
         st.warning(
@@ -459,6 +611,9 @@ with tab4:
     lo, hi = max(hrs - 1.28 * pm.spread, 0.25), hrs + 1.28 * pm.spread
     finish = (pd.Timestamp.combine(pd.Timestamp.today().date(), start) + pd.Timedelta(hours=hrs)).strftime("%-I:%M %p")
     st.markdown(f"## Hiking **{peak}** will take you about **{fmt_hours(hrs)}**")
+    if pm.kind == "moving+stops":
+        mv, sp = pm.parts(miles, gain)
+        st.caption(f"≈ {fmt_hours(mv)} moving + {fmt_hours(sp)} stopped (rests, summit, photos).")
     st.markdown(
         f"Likely range **{fmt_hours(lo)} – {fmt_hours(hi)}** (a rough 80% range based on how far off the model is on your own hikes) · "
         f"starting at {start.strftime('%-I:%M %p')} you'd finish around **{finish}**. "

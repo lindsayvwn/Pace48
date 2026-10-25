@@ -41,9 +41,13 @@ def tags_from_csv(data: bytes) -> dict:
 # Upload it next visit together with only the NEW files. No GPS, name or weight, same as the rest of the app.
 HIKE_FILE_COLUMNS = [
     "start_local", "date", "title", "source_file", "activity_type", "distance_mi", "ascent_ft", "descent_ft",
-    "time_hr", "avg_hr", "max_hr", "calories", "nh4000_peaks", "include",
+    "time_hr", "avg_hr", "max_hr", "calories",
+    "moving_hr", "stopped_hr", "flat_pace_min_mi", "climb_rate_fthr", "steep_climb_rate_fthr",
+    "descent_rate_fthr", "steep_ascent_pct", "profile", "nh4000_peaks", "include",
 ]
-_NUM = ["distance_mi", "ascent_ft", "descent_ft", "time_hr", "avg_hr", "max_hr", "calories"]
+_NUM = ["distance_mi", "ascent_ft", "descent_ft", "time_hr", "avg_hr", "max_hr", "calories",
+        "moving_hr", "stopped_hr", "flat_pace_min_mi", "climb_rate_fthr", "steep_climb_rate_fthr",
+        "descent_rate_fthr", "steep_ascent_pct"]
 
 
 def hikes_to_csv(activities: pd.DataFrame, tags: dict, key_fn) -> bytes:
@@ -52,7 +56,7 @@ def hikes_to_csv(activities: pd.DataFrame, tags: dict, key_fn) -> bytes:
     keys = [key_fn(a, d, m) for a, d, m in zip(out["start_local"], out["date"], out["distance_mi"])]
     out["nh4000_peaks"] = [SEP.join(tags.get(k, {}).get("peaks", [])) for k in keys]
     out["include"] = [bool(tags.get(k, {}).get("include", True)) for k in keys]
-    return out[HIKE_FILE_COLUMNS].to_csv(index=False).encode("utf-8")
+    return out.reindex(columns=HIKE_FILE_COLUMNS).to_csv(index=False).encode("utf-8")
 
 
 def hikes_from_csv(data: bytes) -> pd.DataFrame:
@@ -67,7 +71,7 @@ def hikes_from_csv(data: bytes) -> pd.DataFrame:
     out = pd.DataFrame({
         "start_local": pd.to_datetime(df["start_local"], errors="coerce"),
         "date": pd.to_datetime(df["date"], errors="coerce"),
-        "title": df["title"], "match": "saved", "source_file": df["source_file"], "activity_type": df["activity_type"].replace("", "unknown"),
+        "title": df["title"], "match": "saved", "source_file": df["source_file"], "profile": df["profile"], "activity_type": df["activity_type"].replace("", "unknown"),
     })
     for c in _NUM:
         out[c] = pd.to_numeric(df[c], errors="coerce")

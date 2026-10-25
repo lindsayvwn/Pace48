@@ -12,6 +12,8 @@ import zipfile
 
 import pandas as pd
 
+from track_features import TRACK_COLUMNS, TRACK_NUMERIC, empty_features, extract
+
 M_PER_MILE = 1609.344
 FT_PER_M = 3.28084
 
@@ -20,8 +22,8 @@ HIKE_COLUMNS = [
     "start_local", "date", "title", "match", "source_file", "activity_type",
     "distance_mi", "ascent_ft", "descent_ft", "time_hr",
     "avg_hr", "max_hr", "calories",
-]
-NUMERIC = ["distance_mi", "ascent_ft", "descent_ft", "time_hr", "avg_hr", "max_hr", "calories"]
+] + TRACK_COLUMNS  # moving/stopped time, pace by grade, elevation+HR profile (only from .fit files)
+NUMERIC = ["distance_mi", "ascent_ft", "descent_ft", "time_hr", "avg_hr", "max_hr", "calories"] + TRACK_NUMERIC
 MATCH_TOLERANCE_S = 180  # CSV and .fit start times may differ by a few seconds
 
 MAX_ZIP_MEMBERS = 2000
@@ -35,6 +37,7 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
 
     session = None
     local_ts = None
+    rec: dict[str, list] = {"t": [], "d": [], "a": [], "v": [], "h": []}  # time, distance, altitude, speed, heart rate
     try:
         with fitdecode.FitReader(io.BytesIO(data)) as reader:
             for frame in reader:
@@ -45,15 +48,27 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
                         "sport", "sub_sport", "start_time", "total_distance", "total_ascent", "total_descent",
                         "total_timer_time", "total_elapsed_time", "avg_heart_rate", "max_heart_rate",
                         "total_calories")}
+                elif frame.name == "record":  # no GPS fields are read
+                    rec["t"].append(frame.get_value("timestamp", fallback=None))
+                    rec["d"].append(frame.get_value("distance", fallback=None))
+                    rec["a"].append(frame.get_value("enhanced_altitude", fallback=frame.get_value("altitude", fallback=None)))
+                    rec["v"].append(frame.get_value("enhanced_speed", fallback=frame.get_value("speed", fallback=None)))
+                    rec["h"].append(frame.get_value("heart_rate", fallback=None))
                 elif frame.name == "activity" and local_ts is None:
                     local_ts = frame.get_value("local_timestamp", fallback=None)
     except Exception:
         return None
     if not session or session["total_distance"] is None:
         return None
-    secs = session["total_timer_time"] or session["total_elapsed_time"]
+    # Total (elapsed) time includes breaks and pauses, which is what matters for planning a day, and it matches
+    # how the Activities.csv path measures time. Timer time (clock stopped on pauses) is the fallback.
+    secs = session["total_elapsed_time"] or session["total_timer_time"]
     if secs is None:
         return None
+    try:
+        track = extract(rec["t"], rec["d"], rec["a"], rec["v"], rec["h"], secs)
+    except Exception:  # a odd track must never stop the hike from loading
+        track = empty_features()
     start = session["start_time"]
     if local_ts is not None:  # watch's local clock = what Garmin Connect shows in the CSV
         start_local = pd.Timestamp(local_ts)
@@ -78,6 +93,7 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
         "avg_hr": session["avg_heart_rate"],
         "max_hr": session["max_heart_rate"],
         "calories": session["total_calories"],
+        **track,
     }
 
 
@@ -151,6 +167,9 @@ def parse_activities_csv(data: bytes, distance_unit: str = "mi", elevation_unit:
         "max_hr": _to_num(pick("max_hr")),
         "calories": _to_num(pick("calories")),
     })
+    for c in TRACK_NUMERIC:
+        out[c] = float("nan")
+    out["profile"] = ""
     return out[HIKE_COLUMNS]
 
 
@@ -243,8 +262,10 @@ def merge_sources(csv_df: pd.DataFrame, fit_df: pd.DataFrame) -> pd.DataFrame:
         rows.append(row)
     leftovers = csv_df[~csv_df.index.isin(used)]
     out = pd.concat([pd.DataFrame(rows), leftovers], ignore_index=True)
+    out = out.reindex(columns=HIKE_COLUMNS)
     out["source_file"] = out["source_file"].fillna("")
-    return out[HIKE_COLUMNS].sort_values("start_local").reset_index(drop=True)
+    out["profile"] = out["profile"].fillna("")
+    return out.sort_values("start_local").reset_index(drop=True)
 
 
 def load_activities(csv_bytes: bytes, fit_files: list[tuple[str, bytes]], distance_unit="mi", elevation_unit="ft"):
@@ -305,6 +326,10 @@ def combine_saved(prior: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
                 merged["title"] = old["title"]
             if not str(merged.get("source_file") or "").strip():
                 merged["source_file"] = old.get("source_file", "")
+            for c in TRACK_COLUMNS:  # a bare CSV row must not wipe saved track features
+                v = merged.get(c)
+                if v is None or (isinstance(v, float) and pd.isna(v)) or v == "":
+                    merged[c] = old.get(c, v)
             rows[i] = merged
     out = pd.DataFrame(rows)
     for c in extra:
