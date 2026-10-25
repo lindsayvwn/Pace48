@@ -10,7 +10,8 @@ This project focuses on creating a streamlit app that will ingest your Garmin hi
 1. **Upload** your Garmin `Activities.csv` (required: supplies activity titles) plus the `.zip`/`.fit` files for your hikes
    (recommended: Garmin's CSV often leaves climb blank). Rows are matched by start time.
 2. **Tag & exclude**: untick *Use* to leave an activity out; pick NH 4000 peaks (auto-suggested from titles).
-3. **Save your tags** (download button) and upload that file next visit so you don't have to re-tag.
+3. **Save my hikes** (download button): one condensed file with your hike numbers, tags and exclusions. Next visit, upload it
+   as step ⓪ plus only your *new* hikes (Activities.csv + new .zip/.fit files); no need to re-upload everything.
 4. **Explore** columns with line / scatter / histogram charts.
 5. **Model**: pick two inputs + a target, fit a linear regression, type values, get a prediction.
 6. **Predict a peak**: the default model is `distance_mi + ascent_ft → time_hr`, applied to each peak's reference route.

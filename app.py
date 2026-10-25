@@ -13,8 +13,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from garmin_io import activity_key, load_activities
-from tags_io import tags_from_csv, tags_to_csv
+from garmin_io import HIKE_COLUMNS, activity_key, combine_saved, load_activities
+from tags_io import hikes_from_csv, hikes_to_csv, tags_from_csv, tags_to_csv
 from model import FEATURES, MIN_HIKES_FOR_REGRESSION, TARGET, PaceModel, fit_regression, predict
 
 HERE = Path(__file__).parent
@@ -22,7 +22,7 @@ PEAKS = pd.read_csv(HERE / "data" / "nh4000_peaks.csv")
 DEMO_CSV = HERE / "data" / "demo_activities_SYNTHETIC.csv"
 ACCENT = "#2E6F57"
 
-st.set_page_config(page_title="NH 4000-Footer Pace Predictor", page_icon="🏔️", layout="wide")
+st.set_page_config(page_title="NH48 Pace Predictor", page_icon="🏔️", layout="wide")
 
 LABELS = {
     "distance_mi": "Distance (mi)", "ascent_ft": "Elevation gain (ft)", "descent_ft": "Elevation loss (ft)",
@@ -80,8 +80,13 @@ st.title("🥾 NH 4000-Footer Pace Predictor")
 # ----------------------------------------------------------------- sidebar
 with st.sidebar:
     st.header("Your data")
+    saved_up = st.file_uploader(
+        "⓪ Saved hikes file (if you've been here before)", type=["csv"],
+        help="The 'Save my hikes' file you downloaded last time. It holds your hikes AND your tags, so you only "
+             "need to upload files for NEW hikes.",
+    )
     csv_up = st.file_uploader(
-        "① Activities.csv (required)", type=["csv"],
+        "① Activities.csv (required for new hikes)", type=["csv"],
         help="Garmin Connect → Activities → Export CSV. It supplies your activity titles.",
     )
     fit_ups = st.file_uploader(
@@ -90,7 +95,7 @@ with st.sidebar:
              "and are matched to the CSV by start time.",
     )
     tags_up = st.file_uploader(
-        "③ Saved peak tags (optional)", type=["csv"],
+        "③ Older tags-only file (optional)", type=["csv"],
         help="The file you downloaded from this app last time. It restores your NH 4000 tags and exclusions.",
     )
     use_demo = st.checkbox("No Garmin data? Use synthetic demo data", value=False)
@@ -114,10 +119,10 @@ with st.sidebar:
     )
 
 # ------------------------------------------------------------- load data
-csv_bytes = csv_up.getvalue() if csv_up else (DEMO_CSV.read_bytes() if use_demo else None)
+csv_bytes = csv_up.getvalue() if csv_up else (DEMO_CSV.read_bytes() if use_demo and not saved_up else None)
 fit_files = [(f.name, f.getvalue()) for f in (fit_ups or [])]
 
-if csv_bytes is None:
+if csv_bytes is None and saved_up is None:
     st.markdown("### 👈 Start by uploading your Garmin Activities.csv")
     st.markdown(
         "1. Upload **Activities.csv** (your titles) and the **.zip** files for the hikes you want (real climb and time)  \n"
@@ -138,12 +143,22 @@ def _load(csv_b, fit_tuple, du, eu):
 loader = st.empty()
 loader.markdown(LOADER_HTML, unsafe_allow_html=True)
 try:
-    activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit)
+    if csv_bytes is not None:
+        activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit)
+    else:
+        activities, notes = pd.DataFrame(columns=HIKE_COLUMNS), []
+        if fit_files:
+            notes.append("Upload the matching Activities.csv too, so new .fit files get their titles.")
+    saved_df = hikes_from_csv(saved_up.getvalue()) if saved_up is not None else None
 except ValueError as e:
     loader.empty()
     st.error(str(e))
     st.stop()
 loader.empty()
+if saved_df is not None:
+    n_before = len(saved_df)
+    activities = combine_saved(saved_df[HIKE_COLUMNS], activities)
+    st.caption(f"Loaded **{n_before} saved hikes**; {len(activities) - n_before} new from this visit's uploads.")
 for n in notes:
     st.warning(n)
 if activities.empty:
@@ -180,6 +195,17 @@ if not all("hik" in t.lower() for t in chosen_types):
 # st.session_state["tags"] maps activity key -> {"peaks": [...], "include": bool, ...}.
 # The key is the activity's start time, so it stays valid when you add more files later.
 tags: dict = st.session_state.setdefault("tags", {})
+if saved_df is not None:
+    sig = (saved_up.name, saved_up.size)
+    if st.session_state.get("saved_sig") != sig:  # apply each saved file once, not on every rerun
+        for _, r in saved_df.iterrows():
+            tags[activity_key(r["start_local"], r["date"], r["distance_mi"])] = {
+                "peaks": r["peaks"], "include": bool(r["include"]),
+                "date": f"{r['date']:%Y-%m-%d}" if pd.notna(r["date"]) else "", "title": r["title"],
+                "distance_mi": round(float(r["distance_mi"]), 2) if pd.notna(r["distance_mi"]) else "",
+            }
+        st.session_state["saved_sig"] = sig
+        st.session_state["tags_version"] = st.session_state.get("tags_version", 0) + 1
 if tags_up is not None:
     sig = (tags_up.name, tags_up.size)
     if st.session_state.get("tags_sig") != sig:  # apply each saved file once, not on every rerun
@@ -301,10 +327,16 @@ with tab1:
             st.success("Every activity you're using has climb data.")
 
     st.download_button(
-        "💾 Save my peak tags & exclusions", data=tags_to_csv(tags), file_name="my_nh4000_tags.csv", mime="text/csv",
-        help="Next visit, upload this file in the sidebar (step ③) and your tags come right back.",
+        "💾 Save my hikes (upload this next time)", type="primary",
+        data=hikes_to_csv(activities, tags, activity_key), file_name="my_pace48_hikes.csv", mime="text/csv",
+        help="One condensed file with your hike numbers, peak tags and exclusions. Next visit, upload it in the "
+             "sidebar (step ⓪) plus only your NEW hikes, and everything comes back. No GPS data is included.",
     )
-    st.caption("Tip: this app can't remember you between visits, so download this file when you're done tagging.")
+    st.download_button(
+        "Save tags only (older format)", data=tags_to_csv(tags), file_name="my_nh4000_tags.csv", mime="text/csv",
+        help="Tags and exclusions only, without hike numbers. Prefer the hikes file above.",
+    )
+    st.caption("Tip: this app can't remember you between visits, so download your hikes file when you're done.")
 
 if hikes.empty:
     st.info("Every activity is unticked. Tick at least one in the table above.")

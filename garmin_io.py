@@ -261,3 +261,41 @@ def hikes_only(df: pd.DataFrame, types: list[str] | None = None) -> pd.DataFrame
     else:
         mask = df["activity_type"].isin(types)
     return df[mask].reset_index(drop=True)
+
+
+def combine_saved(prior: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+    """Merge hikes from a saved file with freshly uploaded ones.
+
+    * Same activity = starts within MATCH_TOLERANCE_S of each other.
+    * For a duplicate, keep the row that has climb data (a bare CSV row won't overwrite a .fit-derived one);
+      if both do, the newly uploaded row wins. The saved start time and title are kept so tags stay attached.
+    """
+    prior = prior.copy()
+    if new.empty:
+        return prior.sort_values("start_local").reset_index(drop=True)
+    if prior.empty:
+        return new.sort_values("start_local").reset_index(drop=True)
+    extra = [c for c in prior.columns if c not in HIKE_COLUMNS]  # 'peaks', 'include' ride along
+    for c in extra:
+        new = new.assign(**{c: pd.Series([None] * len(new), dtype=object)})
+    rows = prior.to_dict("records")
+    starts = pd.to_datetime(prior["start_local"]).reset_index(drop=True)
+    for _, n in new.sort_values("start_local").iterrows():
+        diffs = (starts - n["start_local"]).abs().dt.total_seconds() if len(starts) else pd.Series(dtype=float)
+        i = int(diffs.idxmin()) if len(diffs) and diffs.min() <= MATCH_TOLERANCE_S else None
+        if i is None:
+            rows.append(n.to_dict())
+            starts = pd.concat([starts, pd.Series([n["start_local"]])], ignore_index=True)
+            continue
+        old = rows[i]
+        if pd.notna(n["ascent_ft"]) or pd.isna(old["ascent_ft"]):  # new has climb, or neither does
+            merged = n.to_dict()
+            for c in ("start_local", "date") + tuple(extra):
+                merged[c] = old[c]
+            if str(old.get("title", "")).strip() and merged.get("match") in ("fit only", None):
+                merged["title"] = old["title"]
+            rows[i] = merged
+    out = pd.DataFrame(rows)
+    for c in extra:
+        out[c] = out[c].map(lambda v: v if isinstance(v, (list, bool)) else None)
+    return out.sort_values("start_local").reset_index(drop=True)
