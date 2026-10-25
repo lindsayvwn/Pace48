@@ -6,6 +6,8 @@ the app learns YOUR pace and predicts how long any of the 48 peaks will take you
 from __future__ import annotations
 
 import re
+import secrets as pysecrets
+import time
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import garmin_api as gapi
 from garmin_io import activity_key, load_activities
 from tags_io import tags_from_csv, tags_to_csv
 from model import FEATURES, MIN_HIKES_FOR_REGRESSION, TARGET, PaceModel, fit_regression, predict
@@ -73,6 +76,75 @@ def suggest_peaks(title: str) -> list[str]:
     return found
 
 
+# ------------------------------------------------------------ Garmin sign-in
+@st.cache_resource
+def _pending_logins() -> dict:
+    """state -> (code_verifier, created_at). Lives on the server so it survives Garmin's redirect back
+    (which starts a fresh browser session)."""
+    return {}
+
+
+def _garmin_cfg() -> dict | None:
+    try:
+        g = dict(st.secrets["garmin"])
+    except Exception:
+        return None
+    return g if all(g.get(k) for k in ("client_id", "client_secret", "redirect_uri")) else None
+
+
+def _finish_garmin_login(cfg: dict) -> None:
+    """If Garmin just sent the user back with ?code=...&state=..., trade it for a token."""
+    qp = st.query_params
+    code, state = qp.get("code"), qp.get("state")
+    if not code or not state:
+        return
+    pending = _pending_logins()
+    now = time.time()
+    for k in [k for k, (_, t) in pending.items() if now - t > 600]:  # drop stale attempts
+        pending.pop(k, None)
+    entry = pending.pop(state, None)
+    st.query_params.clear()
+    if entry is None:
+        st.session_state["garmin_err"] = "That sign-in link expired. Please try again."
+        return
+    try:
+        tok = gapi.exchange_code(cfg["client_id"], cfg["client_secret"], code, entry[0], cfg["redirect_uri"])
+        st.session_state["garmin_tok"] = tok
+        st.session_state["garmin_uid"] = gapi.get_user_id(tok["access_token"])
+    except gapi.GarminError as e:
+        st.session_state["garmin_err"] = str(e)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_garmin(user_id: str, store_url: str, store_token: str) -> pd.DataFrame:
+    return gapi.summaries_to_df(gapi.HttpActivityStore(store_url, store_token).fetch(user_id))
+
+
+def garmin_sign_in_panel() -> None:
+    cfg = _garmin_cfg()
+    if cfg is None:
+        st.info("Garmin sign-in isn't set up on this copy of the app yet. Upload your files instead.")
+        return
+    _finish_garmin_login(cfg)
+    if st.session_state.get("garmin_err"):
+        st.error(st.session_state.pop("garmin_err"))
+    if "garmin_tok" in st.session_state:
+        st.success("✅ Connected to Garmin")
+        if st.button("Disconnect"):
+            for k in ("garmin_tok", "garmin_uid"):
+                st.session_state.pop(k, None)
+            st.rerun()
+        return
+    verifier, challenge = gapi.new_pkce()
+    state = pysecrets.token_urlsafe(24)
+    _pending_logins()[state] = (verifier, time.time())
+    url = gapi.build_auth_url(cfg["client_id"], cfg["redirect_uri"], state, challenge)
+    # plain link (same tab): st.link_button would open a new tab and strand this session
+    st.markdown(f'<a href="{url}" target="_self" style="display:block;text-align:center;padding:.5rem;'
+                f'border-radius:.5rem;background:{ACCENT};color:#fff;text-decoration:none">Sign in with Garmin</a>',
+                unsafe_allow_html=True)
+
+
 # ------------------------------------------------------------------ header
 st.markdown(HIDE_DEFAULT_STATUS, unsafe_allow_html=True)
 st.title("🥾 NH 4000-Footer Pace Predictor")
@@ -86,23 +158,34 @@ st.info(
 # ----------------------------------------------------------------- sidebar
 with st.sidebar:
     st.header("Your data")
-    csv_up = st.file_uploader(
-        "① Activities.csv (required)", type=["csv"],
-        help="Garmin Connect → Activities → Export CSV. It supplies your activity titles.",
+    source = st.radio(
+        "How do you want to bring in your hikes?", ["Upload Garmin files", "Sign in with Garmin"],
+        help="Either way, you choose which hikes to use and tag your peaks afterwards.",
     )
-    fit_ups = st.file_uploader(
-        "② Activity .zip / .fit files (recommended)", type=["zip", "fit"], accept_multiple_files=True,
-        help="Garmin's CSV often leaves climb blank. The .fit files carry the real distance, climb and time, "
-             "and are matched to the CSV by start time.",
-    )
+    csv_up, fit_ups, use_demo = None, [], False
+    if source == "Upload Garmin files":
+        csv_up = st.file_uploader(
+            "① Activities.csv (required)", type=["csv"],
+            help="Garmin Connect → Activities → Export CSV. It supplies your activity titles.",
+        )
+        fit_ups = st.file_uploader(
+            "② Activity .zip / .fit files (recommended)", type=["zip", "fit"], accept_multiple_files=True,
+            help="Garmin's CSV often leaves climb blank. The .fit files carry the real distance, climb and time, "
+                 "and are matched to the CSV by start time.",
+        )
+    else:
+        garmin_sign_in_panel()
     tags_up = st.file_uploader(
         "③ Saved peak tags (optional)", type=["csv"],
         help="The file you downloaded from this app last time. It restores your NH 4000 tags and exclusions.",
     )
-    use_demo = st.checkbox("No Garmin data? Use synthetic demo data", value=False)
-    c1, c2 = st.columns(2)
-    dist_unit = c1.radio("CSV distance", ["mi", "km"], horizontal=True)
-    elev_unit = c2.radio("CSV elevation", ["ft", "m"], horizontal=True)
+    if source == "Upload Garmin files":
+        use_demo = st.checkbox("No Garmin data? Use synthetic demo data", value=False)
+    dist_unit, elev_unit = "mi", "ft"
+    if source == "Upload Garmin files":
+        c1, c2 = st.columns(2)
+        dist_unit = c1.radio("CSV distance", ["mi", "km"], horizontal=True)
+        elev_unit = c2.radio("CSV elevation", ["ft", "m"], horizontal=True)
     with st.expander("How do I get my files from Garmin?"):
         st.markdown(
             "**Activities.csv:** Garmin Connect → Activities → scroll to load the activities you want → *Export CSV*.\n\n"
@@ -114,42 +197,70 @@ with st.sidebar:
         "climb, time, date and heart-rate summaries: **no GPS, name or weight**. Nothing is saved on a server."
     )
     st.caption(
-        "Why no Garmin login? Garmin only allows account connections for approved companies, and asking for "
-        "your password in a public app would be unsafe. Uploading gives you full control over which activities "
-        "the app sees."
+        "Signing in happens on Garmin's own page through their official connection program. This app never sees "
+        "your Garmin password. Prefer not to connect? Upload your files instead."
     )
 
 # ------------------------------------------------------------- load data
-csv_bytes = csv_up.getvalue() if csv_up else (DEMO_CSV.read_bytes() if use_demo else None)
-fit_files = [(f.name, f.getvalue()) for f in (fit_ups or [])]
+# Both sources end as the same `activities` table (garmin_io.HIKE_COLUMNS); everything below is unchanged.
+notes: list[str] = []
+if source == "Sign in with Garmin":
+    if "garmin_tok" not in st.session_state:
+        st.markdown("### 👈 Sign in with Garmin to bring in your hikes")
+        st.markdown(
+            "1. Click **Sign in with Garmin** and approve access on Garmin's page  \n"
+            "2. Choose which hikes to use and tag any NH 4000-footers  \n"
+            "3. Explore your pace, then get a predicted time for any peak  \n"
+            "Prefer files? Switch to **Upload Garmin files** in the sidebar."
+        )
+        with st.expander("Preview the 48 NH 4000-footers reference list"):
+            st.dataframe(PEAKS, hide_index=True, width="stretch")
+        st.stop()
+    cfg = _garmin_cfg()
+    try:
+        st.session_state["garmin_tok"] = gapi.valid_access_token(
+            st.session_state["garmin_tok"], cfg["client_id"], cfg["client_secret"])
+        g = dict(st.secrets["garmin"])
+        if not (g.get("store_url") and g.get("store_token")):
+            st.warning("You're connected, but this app's Garmin activity store isn't configured yet, so there is "
+                       "nothing to load. Upload your files for now.")
+            st.stop()
+        activities = _fetch_garmin(st.session_state["garmin_uid"], g["store_url"], g["store_token"])
+    except gapi.GarminError as e:
+        st.error(str(e))
+        st.stop()
+    if activities.empty:
+        st.info("Connected. Garmin hasn't delivered any activities yet. New activities appear after your watch syncs.")
+        st.stop()
+else:
+    csv_bytes = csv_up.getvalue() if csv_up else (DEMO_CSV.read_bytes() if use_demo else None)
+    fit_files = [(f.name, f.getvalue()) for f in (fit_ups or [])]
 
-if csv_bytes is None:
-    st.markdown("### 👈 Start by uploading your Garmin Activities.csv")
-    st.markdown(
-        "1. Upload **Activities.csv** (your titles) and the **.zip** files for the hikes you want (real climb and time)  \n"
-        "2. Tag which ones were NH 4000-footers, and untick any you want to leave out  \n"
-        "3. Explore your pace, then get a predicted time for any peak  \n"
-        "4. **Download your tags** so next time you can upload them instead of starting over"
-    )
-    with st.expander("Preview the 48 NH 4000-footers reference list"):
-        st.dataframe(PEAKS, hide_index=True, width="stretch")
-    st.stop()
+    if csv_bytes is None:
+        st.markdown("### 👈 Start by uploading your Garmin Activities.csv")
+        st.markdown(
+            "1. Upload **Activities.csv** (your titles) and the **.zip** files for the hikes you want (real climb and time)  \n"
+            "2. Tag which ones were NH 4000-footers, and untick any you want to leave out  \n"
+            "3. Explore your pace, then get a predicted time for any peak  \n"
+            "4. **Download your tags** so next time you can upload them instead of starting over"
+        )
+        with st.expander("Preview the 48 NH 4000-footers reference list"):
+            st.dataframe(PEAKS, hide_index=True, width="stretch")
+        st.stop()
 
+    @st.cache_data(show_spinner=False)
+    def _load(csv_b, fit_tuple, du, eu):
+        return load_activities(csv_b, list(fit_tuple), du, eu)
 
-@st.cache_data(show_spinner=False)
-def _load(csv_b, fit_tuple, du, eu):
-    return load_activities(csv_b, list(fit_tuple), du, eu)
-
-
-loader = st.empty()
-loader.markdown(LOADER_HTML, unsafe_allow_html=True)
-try:
-    activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit)
-except ValueError as e:
+    loader = st.empty()
+    loader.markdown(LOADER_HTML, unsafe_allow_html=True)
+    try:
+        activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit)
+    except ValueError as e:
+        loader.empty()
+        st.error(str(e))
+        st.stop()
     loader.empty()
-    st.error(str(e))
-    st.stop()
-loader.empty()
 for n in notes:
     st.warning(n)
 if activities.empty:
@@ -158,7 +269,9 @@ if activities.empty:
 
 # match summary
 counts = activities["match"].value_counts()
-if fit_files:
+if source == "Sign in with Garmin":
+    st.caption("Loaded straight from your Garmin account.")
+elif fit_files:
     st.caption(
         f"Cross-referenced with your .fit files: **{counts.get('matched', 0)} matched**"
         + (f" · {counts.get('fit only', 0)} .fit file(s) with no CSV row (named by filename)" if counts.get("fit only", 0) else "")
