@@ -735,7 +735,7 @@ with tab3:
             st.caption("Dotted line = prediction line. Hover a dot to see which hike it is.")
             st.caption(
                 f"**Limitations:** this model is fit on {fit['n']} activit{'y' if fit['n'] == 1 else 'ies'}. Small samples make these results less reliable, so interpret them with caution."
-                " Additional variables that may influene results are season (winter versus summer), rest times, hiking buddies, etc. These variables can shift results noticeably"
+                " Additional variables that may influence results are season (winter versus summer), rest times, hiking buddies, etc. These variables can shift results noticeably. "
                 "The model only sees only sees distance and climb, not weather, trail roughness or how tired you were, and it is least reliable for "
                 "trips longer or steeper than anything you've logged. More activities, ideally with a mix of lengths and "
                 "climbs, will improve predictions."
