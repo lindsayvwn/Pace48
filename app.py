@@ -114,6 +114,36 @@ def uphill_hr(profile_json) -> float:
 
 
 # Animated loader: running, mountains, climbing, hiking, birds. Replaces Streamlit's built-in status figure.
+# Folder-style tabs: each tab looks like a raised card with rounded top corners and a soft shadow; the selected one sits "in front".
+# The last tab (Limitations & Roadmap) is tinted light red. Colours are translucent so they work in light and dark themes.
+TAB_CSS = """
+<style>
+[role="tablist"] { gap: 6px; padding: 10px 4px 0 4px; border-bottom: 2px solid rgba(128,128,128,0.35); }
+[role="tablist"] [role="tab"] {
+  background: linear-gradient(to bottom, rgba(128,128,128,0.06), rgba(128,128,128,0.22));
+  border: 1px solid rgba(128,128,128,0.40); border-bottom: none;
+  border-radius: 12px 12px 0 0; padding: 8px 16px; margin-bottom: -2px; height: auto; position: relative;
+  box-shadow: 0 -3px 6px rgba(0,0,0,0.10), inset 0 1px 0 rgba(255,255,255,0.45);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+[role="tablist"] [role="tab"]:hover { transform: translateY(-2px); box-shadow: 0 -5px 9px rgba(0,0,0,0.14), inset 0 1px 0 rgba(255,255,255,0.5); }
+[role="tablist"] [role="tab"][aria-selected="true"] {
+  background: linear-gradient(to bottom, rgba(46,111,87,0.30), rgba(46,111,87,0.08));
+  border-color: rgba(46,111,87,0.70); border-bottom: 3px solid rgba(46,111,87,0.95);
+  transform: translateY(-3px); box-shadow: 0 -6px 11px rgba(0,0,0,0.20), inset 0 1px 0 rgba(255,255,255,0.6); font-weight: 600;
+}
+[role="tablist"] [role="tab"]:last-of-type {
+  background: linear-gradient(to bottom, rgba(255,150,150,0.28), rgba(255,120,120,0.45));
+  border-color: rgba(220,90,90,0.65);
+}
+[role="tablist"] [role="tab"]:last-of-type[aria-selected="true"] {
+  background: linear-gradient(to bottom, rgba(255,140,140,0.60), rgba(255,170,170,0.28));
+  border-color: rgba(205,60,60,0.90); border-bottom: 3px solid rgba(205,60,60,0.95);
+}
+[role="tablist"] [role="tab"][aria-selected="true"] p { color: inherit !important; }
+[role="tablist"] .react-aria-SelectionIndicator, [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] { display: none !important; }   /* the raised tab replaces the sliding underline */
+</style>
+"""
 HIDE_DEFAULT_STATUS = "<style>[data-testid='stStatusWidget']{display:none !important;}</style>"
 LOADER_HTML = """
 <style>
@@ -296,6 +326,7 @@ def _owner_load(cfg, schema, hidden_dates, hidden_ids, force, progress_bar):
 
 
 # ------------------------------------------------------------------ header
+st.markdown(TAB_CSS, unsafe_allow_html=True)
 st.markdown(HIDE_DEFAULT_STATUS, unsafe_allow_html=True)
 st.title("🥾 NH 4000-Footer Pace Predictor")
 
@@ -465,7 +496,7 @@ all_rows = activities[activities["activity_type"].isin(chosen_types)].reset_inde
 # pace-profile tab and still feed every other tab. Streamlit lets us write into a tab again later.
 tab1, tab2, tab3, tab4, tab_prof, tab5 = st.tabs(
     ["① Preview, tag & exclude", "② Explore", "③ Build a model", "④ Predict an NH 4000-footer",
-     "Your pace profile", "Limitations & roadmap"]
+     "Pace Profile", "Limitations & Roadmap"]
 )
 # The stop-detection controls sit right under the chart's radio buttons (further down). Their values are read from session state here, so
 # every table and tab can use them before those widgets are drawn (Streamlit stores a widget's value by its key at the start of each run).
@@ -707,7 +738,7 @@ def _num(v, unit="", dec=0):
 
 
 with tab_prof:
-    st.subheader("Your pace profile")
+    st.subheader("Pace Profile")
     trk = hikes.dropna(subset=["moving_hr"]).reset_index(drop=True)
     if trk.empty:
         st.info("This tab needs the .zip/.fit files for your hikes, not just Activities.csv. They carry the second-by-second "

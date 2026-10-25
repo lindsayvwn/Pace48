@@ -13,7 +13,7 @@ This project focuses on creating a streamlit app that will ingest your Garmin hi
 3. **Save my hikes** (download button): one condensed file with your hike numbers, tags and exclusions. Next visit, upload it
    as step ⓪ plus only your *new* hikes (Activities.csv + new .zip/.fit files); no need to re-upload everything.
 4. **Explore** columns with line / scatter / histogram charts.
-5. **Your pace profile** (needs the .zip/.fit files): moving vs stopped time, flat-ground pace, climb rate on uphill and
+5. **Pace Profile** (needs the .zip/.fit files): moving vs stopped time, flat-ground pace, climb rate on uphill and
    steep (15%+) sections, descent rate, and an elevation + heart-rate profile with your stops marked for each hike.
 6. **Model**: pick two inputs + a target, fit a linear regression, type values, get a prediction.
 7. **Predict a peak**: the simple model is `distance_mi + ascent_ft → time_hr`, applied to each peak's reference route.
@@ -30,7 +30,7 @@ gained, Naismith-style: 1 m climbed counts like 8 m walked). A stretch is *slow*
 A slow stretch of 1+ minute (the default; adjustable) is a *break* if any of these hold: the watch timer paused; your GPS points stayed inside a tight
 **5 metre circle** for a minute or more (a DBSCAN cluster, see below); or your heart rate fell at least 2 standard deviations below where it was while moving
 (the standard deviation is how much your heart rate normally wobbles from minute to minute on that hike). Slow stretches where heart rate stayed up (ice, rock)
-are shown as *slow technical* and count as moving. The shortest-break and heart-rate numbers live at the top of the **Your pace profile** tab under
+are shown as *slow technical* and count as moving. The shortest-break and heart-rate numbers live at the top of the **Pace Profile** tab under
 "Stop detection (advanced)"; the raw slow stretches are saved with each hike, so changing them is instant. This is unsupervised: no labelled breaks, so treat the default as a starting point.
 
 **Stationary clusters.** While a `.fit` file is being read, its own GPS positions are converted to metres and clustered with DBSCAN (eps 5 m). A cluster only counts
