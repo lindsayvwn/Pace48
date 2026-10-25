@@ -3,7 +3,7 @@
 A Streamlit app that learns **your** hiking pace from Garmin files and predicts how long each of New Hampshire's
 48 four-thousand-footers will take you.
 
-**Live app:** _(paste your Streamlit Community Cloud URL here)_
+**Live app:** _https://pace48.streamlit.app/_
 
 ## How it works
 1. **Upload** your Garmin `Activities.csv` (required: supplies activity titles) plus the `.zip`/`.fit` files for your hikes
@@ -31,10 +31,6 @@ With fewer than 5 hikes the app falls back to the Naismith rule scaled to your p
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## Deploy (Streamlit Community Cloud)
-Push this folder to a **public** GitHub repo, go to https://share.streamlit.io, choose *Create app*, pick the repo,
-branch `main`, main file `app.py`, then Deploy.
 
 ## Files
 `app.py` UI · `garmin_io.py` .fit/CSV parsing, matching, cleaning · `tags_io.py` save/restore tags · `model.py` features, regression, fallback
