@@ -12,19 +12,21 @@ import pandas as pd
 
 # Bump this whenever the definitions below change (what counts as moving/stopped, how rates are computed). Saved hikes
 # and cached results made with an older version are then recognised as stale instead of being shown as if current.
-TRACK_VERSION = 5
+TRACK_VERSION = 6
 
 M_PER_MILE = 1609.344
 FT_PER_M = 3.28084
 
 # "Stopped" is judged from how far you actually travelled, NOT from the watch's speed field: that field reads exactly 0
 # for stretches of a hike while distance keeps advancing, which made a hike look 37% stopped when it was ~13%.
-MOVING_MPS = 0.3          # covering less than this (about 0.7 mph) over WINDOW_S counts as stopped (never higher; see ADAPTIVE below).
+MOVING_MPS = 0.5          # slow = covering less than this (about 1.1 mph) over WINDOW_S; never higher (see ADAPT_FRAC below). Deliberately
+                          # generous: standing around at a summit wanders at 0.1-0.5 m/s of GPS drift. Heart rate decides if it was a rest.
                           # Distance is 3D (ground distance AND height gained), so scrambling straight up rock counts as moving.
-WINDOW_S = 30             # distance covered in a 30 s window centred on each record
-MAX_STEP_S = 5            # a gap between records longer than this is a pause (timer stopped), not movement
+WINDOW_S = 45             # distance covered in a 45 s window centred on each record
+MAX_STEP_S = 30           # a gap between records longer than this is a pause (timer stopped), not movement. Watches on 'smart
+                          # recording' write a point only every 5-10 s, so a gap of a few seconds is normal, NOT a pause.
 MIN_STOP_S = 180          # a "stop" is a break of at least 3 minutes; shorter slowdowns count as part of moving
-MERGE_GAP_S = 30          # a rest interrupted by under 30 s of movement (GPS wobble) is still one stop
+MERGE_GAP_S = 120         # a rest interrupted by under a minute of apparent movement (GPS wobble, shuffling about) is still one stop
 # Statistical approach, all relative to the hike itself rather than fixed numbers:
 #  * "slow" = under ADAPT_FRAC of your own typical moving speed on that hike (capped at MOVING_MPS, floored at MIN_MOVING_MPS),
 #    so a hike done at a crawl on ice isn't judged by a fast hike's yardstick.
@@ -32,9 +34,9 @@ MERGE_GAP_S = 30          # a rest interrupted by under 30 s of movement (GPS wo
 #    least DEFAULT_HR_DROP_SD standard deviations below where it was while moving (SD = how much your heart rate normally varies
 #    on that hike, robustly measured). Otherwise (ice, scrambling) it is "slow technical": still effort, counted as moving.
 # The app lets the viewer change the length and the SD number, so the raw candidates are saved with each hike.
-ADAPT_FRAC, MIN_MOVING_MPS = 0.25, 0.15
+ADAPT_FRAC, MIN_MOVING_MPS = 0.4, 0.2
 DEFAULT_MIN_STOP_S = MIN_STOP_S
-DEFAULT_HR_DROP_SD = 1.25
+DEFAULT_HR_DROP_SD = 2.0
 MIN_CANDIDATE_S = 60      # slow stretches at least this long are saved, so the min-stop slider can go down to 1 minute
 PAUSED_BREAK_FRAC = 0.6   # a slow stretch that is mostly timer-paused is always a break
 HR_BASELINE_S = 300       # "where your heart rate was while moving" = the 5 minutes before the slow stretch
@@ -104,7 +106,7 @@ def extract(ts, dist_m, alt_m, hr, elapsed_s: float) -> dict:
     # slow technical stretches (effort without rest) are still hiking: count them as moving for the pace numbers too
     moving = moving.copy()
     for c in cands:
-        if c["secs"] >= DEFAULT_MIN_STOP_S and not is_break(c, DEFAULT_MIN_STOP_S, DEFAULT_HR_DROP_SD):
+        if not is_break(c, DEFAULT_MIN_STOP_S, DEFAULT_HR_DROP_SD):
             moving[c["first"]:c["last"] + 1] = True
 
     def tot(mask, arr):
@@ -166,12 +168,16 @@ def find_candidates(secs, moving, dt_raw, hr, dist) -> tuple[list[dict], float |
     moving_hr_all = hr[moving & np.isfinite(hr)]
     overall = float(np.median(moving_hr_all)) if len(moving_hr_all) >= 30 else np.nan
     # typical beat-to-beat-minute variation of YOUR heart rate while moving: robust SD (1.4826 x MAD) of a 30 s smoothed series
+    # How much YOUR heart rate wobbles minute to minute while moving: robust SD (1.4826 x MAD) of the 30 s average minus the
+    # trailing 5 minute average, measured on the actual timeline (records are 1-8 s apart). NOT the SD of the whole hike, which
+    # would mostly measure climbing vs descending and be far too large to ever see a rest in.
     sd = np.nan
     if len(moving_hr_all) >= 60:
-        sm = pd.Series(np.where(np.isfinite(hr), hr, np.nan)).rolling(30, center=True, min_periods=10).mean().to_numpy()
-        v = sm[moving & np.isfinite(sm)]
+        ser = pd.Series(np.where(np.isfinite(hr), hr, np.nan), index=pd.to_timedelta(secs, unit="s"))
+        resid = (ser.rolling("30s", min_periods=3).mean() - ser.rolling("300s", min_periods=20).mean()).to_numpy()
+        v = resid[moving & np.isfinite(resid)]
         sd = float(1.4826 * np.median(np.abs(v - np.median(v)))) if len(v) >= 60 else np.nan
-        sd = max(sd, 4.0) if np.isfinite(sd) else sd   # a very steady heart rate must not turn a 3 bpm dip into "5 SD"
+        sd = max(sd, 3.0) if np.isfinite(sd) else sd   # a very steady heart rate must not turn a 2 bpm dip into "many SD"
     out = []
     for first, last, s0, e0 in merged:
         dur = e0 - s0
@@ -181,7 +187,7 @@ def find_candidates(secs, moving, dt_raw, hr, dist) -> tuple[list[dict], float |
         gaps = dt_raw[seg]
         paused = float(np.sum(gaps[gaps > MAX_STEP_S]))
         base_mask = moving & (secs >= s0 - HR_BASELINE_S) & (secs < s0) & np.isfinite(hr)
-        base = float(np.mean(hr[base_mask])) if base_mask.sum() >= 20 else overall
+        base = float(np.mean(hr[base_mask])) if base_mask.sum() >= 20 else np.nan   # no effort before it (start of the hike): nothing to compare, so it counts as a rest
         in_run = (secs >= s0 + dur / 2) & (secs <= e0) & np.isfinite(hr)   # second half: heart rate lags behind a rest
         if in_run.sum() < 3:
             in_run = (secs >= s0) & (secs <= e0) & np.isfinite(hr)

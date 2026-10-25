@@ -24,8 +24,8 @@ With fewer than 5 hikes the app falls back to the Naismith rule scaled to your p
 
 ## How stops are detected
 Every hike is judged against itself, not against fixed numbers. A slow stretch is one where you covered (ground distance plus height
-gained, so scrambling counts) less than about a quarter of your typical moving speed on that hike. A slow stretch of 3+ minutes is a
-*break* only if the watch timer paused or your heart rate fell at least 1.25 standard deviations below where it was while moving
+gained, so scrambling counts) less than about about 40% of your typical moving speed on that hike. A slow stretch of 3+ minutes is a
+*break* only if the watch timer paused or your heart rate fell at least 2 standard deviations below where it was while moving
 (the standard deviation is how much your heart rate normally varies on that hike). Slow stretches where heart rate stayed up (ice, rock)
 are shown as *slow technical* and count as moving. Both numbers can be changed in the sidebar under "Stop detection (advanced)"; the raw
 slow stretches are saved with each hike, so changing them is instant. This is unsupervised: no labelled breaks, so treat the default as a starting point.

@@ -165,7 +165,7 @@ with st.sidebar:
     with st.expander("Stop detection (advanced)"):
         stop_min_min = st.slider("Shortest break to count (minutes)", 1, 10, DEFAULT_MIN_STOP_S // 60,
                                  help="A slow or still stretch shorter than this counts as moving.")
-        hr_drop = st.slider("Heart-rate drop that proves a rest (standard deviations)", 0.0, 3.0, float(DEFAULT_HR_DROP_SD), 0.25,
+        hr_drop = st.slider("Heart-rate drop that proves a rest (standard deviations)", 0.0, 6.0, float(DEFAULT_HR_DROP_SD), 0.25,
                             help="Each hike is judged against itself: the app measures how much YOUR heart rate normally varies "
                                  "while you move on that hike (one standard deviation, often 10-15 bpm). On ice or scrambling the watch "
                                  "can look 'stopped' while you are working hard. A slow stretch only counts as a break if your heart "
@@ -647,7 +647,7 @@ with tab_prof:
             f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?")
             c2.plotly_chart(f2, width="stretch")
         st.caption("A stop is a break: a stretch at or above the shortest-break setting (sidebar, default 3 minutes) where you covered "
-                   "less than about a quarter of your typical moving speed on that hike (at most 0.7 mph) over 30 seconds (counting height gained as well as ground covered, so scrambling "
+                   "less than about 40% of your typical moving speed on that hike (at most about 1 mph) over 45 seconds (counting height gained as well as ground covered, so scrambling "
                    "isn't mistaken for standing still; the watch's own speed reading drops to zero too often to trust) AND either the "
                    "watch's timer paused or your heart rate fell by the sidebar's number of standard deviations (measured on that hike's own "
                    "moving heart rate). Slow stretches where it stayed up, like ice or rock, are 'slow technical' "
