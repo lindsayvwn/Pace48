@@ -24,7 +24,7 @@ from tags_io import hikes_from_csv, hikes_to_csv, tags_from_csv, tags_to_csv
 from model import (FEATURES, MIN_HIKES_FOR_MOVING_MODEL, MIN_HIKES_FOR_REGRESSION, TARGET, MovingStopModel, PaceModel,
                    fit_regression, predict, simple_loo_mae)
 from track_features import (DEFAULT_HR_DROP_SD, DEFAULT_MIN_STOP_S, TRACK_NUMERIC, TRACK_VERSION, apply_stop_rules,
-                            profile_frame, profile_version)
+                            peaks_from_profile, profile_frame, profile_version)
 
 HERE = Path(__file__).parent
 PEAKS = pd.read_csv(HERE / "data" / "nh4000_peaks.csv")
@@ -343,7 +343,7 @@ with st.sidebar:
         )
     st.caption(
         "🔒 Files are read in memory for this session only. From .fit files the app keeps just distance, "
-        "climb, time, date, heart-rate summaries and a small elevation/heart-rate profile: **no GPS, name or weight** are saved (positions are checked in memory only, to spot rests, then discarded). Nothing is saved on a server."
+        "climb, time, date, heart-rate summaries and a small elevation/heart-rate profile: **no GPS, name or weight** are saved (positions are checked in memory only, to spot rests and which summits you reached, then discarded). Nothing is saved on a server."
     )
     st.caption(
         "Why no Garmin login? Garmin only allows account connections for approved companies, and asking for "
@@ -539,7 +539,12 @@ if owner_df is not None:   # the owner's committed tags (data/owner_tags.csv) ar
         tags.setdefault(_k, dict(_v))
 for _, r in all_rows.iterrows():
     entry = tags.setdefault(r["key"], {"peaks": [], "include": True, "auto": True})
-    if entry.get("auto") and not entry["peaks"]:   # still untouched by the user: keep (re)suggesting from the title
+    gps_peaks = peaks_from_profile(r["profile"]) if isinstance(r["profile"], str) else None
+    if gps_peaks is not None and entry.get("auto") is not False:
+        # the track itself says which summits were reached: that replaces any title-based guess (and old saved tags) unless
+        # the user has edited this hike's peaks by hand in this session
+        entry["peaks"], entry["auto"] = list(gps_peaks), True
+    elif entry.get("auto") and not entry["peaks"]:   # no GPS answer and untouched by the user: suggest from the title
         entry["peaks"] = suggest_peaks(r["title"])
     entry.update(date=f"{r['date']:%Y-%m-%d}" if pd.notna(r["date"]) else "", title=r["title"],
                  distance_mi=round(float(r["distance_mi"]), 2) if pd.notna(r["distance_mi"]) else "")
@@ -593,7 +598,8 @@ with tab1:
         })
     st.markdown(
         "**Tick the activities to use, and tag any NH 4000-footers.** Untick *Use* to leave an activity out of every "
-        "chart and model. Pick peak(s) in the *NH 4000 peaks* column (some are pre-filled from the title)."
+        "chart and model. Peaks in the *NH 4000 peaks* column are filled in from your GPS track (any summit the track reached, which beats the title); "
+        "hikes without GPS fall back to the title. Edit the column to override a hike."
         " Why might you want to *untick* an activity? Depending on your goals, you might want to exclude certain activities from analysis or visualization."
         "For example, if you went on a hike with a group and your pace was significantly slower than usual, you might want to untick that activity to avoid skewing the results."
     )

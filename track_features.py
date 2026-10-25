@@ -9,15 +9,24 @@ ever looked at.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 # Bump this whenever the definitions below change (what counts as moving/stopped, how rates are computed). Saved hikes
 # and cached results made with an older version are then recognised as stale instead of being shown as if current.
-TRACK_VERSION = 8
+TRACK_VERSION = 9
 
 M_PER_MILE = 1609.344
+
+# Peak detection from the track: a hike "reached" an NH 4000-footer if some record is within SUMMIT_RADIUS_M of its published summit
+# position AND at the peak's elevation (within SUMMIT_ALT_TOL_M below it, so a trail passing near but well below a summit doesn't count;
+# the tolerance also absorbs barometer drift and small errors in the published coordinates). Computed in memory; only the names are kept.
+SUMMIT_RADIUS_M = 250.0
+SUMMIT_ALT_TOL_M = 30.0
+_DATA = Path(__file__).parent / "data"
 FT_PER_M = 3.28084
 
 # "Stopped" is judged from how far you actually travelled, NOT from the watch's speed field: that field reads exactly 0
@@ -161,8 +170,53 @@ def extract(ts, dist_m, alt_m, hr, elapsed_s: float, lat=None, lon=None) -> dict
     if all_up_m > 0:
         out["steep_ascent_pct"] = 100 * tot(bins["steep_up"], np.clip(dalt, 0, None)) / all_up_m
 
-    out["profile"] = _profile(df, dist, alt, cands, hr_sd, dt, moving, secs)
+    peaks = _peaks_reached(df["la"].to_numpy(), df["lo"].to_numpy(), alt)
+    out["profile"] = _profile(df, dist, alt, cands, hr_sd, dt, moving, secs, peaks)
     return out
+
+
+@lru_cache(maxsize=1)
+def _summits() -> pd.DataFrame | None:
+    """data/nh4000_summits.csv (peak, lat, lon) joined with each peak's elevation from data/nh4000_peaks.csv. None if missing."""
+    try:
+        s = pd.read_csv(_DATA / "nh4000_summits.csv")
+        e = pd.read_csv(_DATA / "nh4000_peaks.csv")[["peak", "elevation_ft"]]
+        return s.merge(e, on="peak", how="inner")
+    except Exception:
+        return None
+
+
+def _peaks_reached(lat_sc, lon_sc, alt) -> list[str] | None:
+    """Names of the NH 4000-footers this track reached (see SUMMIT_RADIUS_M), in the order first reached; [] if it has GPS but
+    reached none; None if there is no usable GPS (so callers can fall back to the title). Coordinates stay inside this function."""
+    try:
+        sm = _summits()
+        ok = np.isfinite(lat_sc) & np.isfinite(lon_sc)
+        if sm is None or ok.sum() < 30:
+            return None
+        lat = lat_sc[ok] * (180.0 / 2 ** 31)
+        lon = lon_sc[ok] * (180.0 / 2 ** 31)
+        a = np.asarray(alt, dtype=float)[ok]
+        order = np.arange(len(lat))
+        hits = []
+        for p, plat, plon, elev_ft in zip(sm["peak"], sm["lat"], sm["lon"], sm["elevation_ft"]):
+            dy = (lat - plat) * 110540.0
+            dx = (lon - plon) * 111320.0 * np.cos(np.radians(plat))
+            near = (np.hypot(dx, dy) <= SUMMIT_RADIUS_M) & (a >= elev_ft / FT_PER_M - SUMMIT_ALT_TOL_M)
+            if near.any():
+                hits.append((int(order[near][0]), p))
+        return [p for _, p in sorted(hits)]
+    except Exception:
+        return None
+
+
+def peaks_from_profile(profile_json) -> list[str] | None:
+    """Peaks a saved profile says the hike reached; None if it has no GPS-based answer (older profile or no GPS)."""
+    try:
+        pk = json.loads(profile_json).get("pk")
+        return [str(x) for x in pk] if isinstance(pk, list) else None
+    except Exception:
+        return None
 
 
 def _still_mask(secs, lat_sc, lon_sc, alt, vert) -> np.ndarray:
@@ -277,7 +331,7 @@ def is_break(c: dict, min_stop_s: float, hr_drop_sd: float) -> bool:
     return c["hr_drop"] >= hr_drop_sd
 
 
-def _profile(df, dist, alt, cands, hr_sd=None, dt=None, moving=None, secs=None) -> str:
+def _profile(df, dist, alt, cands, hr_sd=None, dt=None, moving=None, secs=None, peaks=None) -> str:
     """~80 evenly spaced points along the route: miles, altitude (ft), heart rate (bpm); plus the slow stretches ("c"):
     [mile, seconds, share of it timer-paused, heart-rate drop in SDs or null, share of it inside a stationary cluster]; "sd" = that SD in bpm, so stop rules can be re-applied without the .fit file."""
     total = dist[-1]
@@ -311,7 +365,8 @@ def _profile(df, dist, alt, cands, hr_sd=None, dt=None, moving=None, secs=None) 
     c = [[round(x["mile"], 2), int(round(x["secs"])), round(x["paused_frac"], 2),
           None if x["hr_drop"] is None else round(x["hr_drop"], 2), round(x.get("still_frac", 0.0), 2)] for x in cands]
     return json.dumps({"ver": TRACK_VERSION, "d": rnd(centers / M_PER_MILE, 2), "a": rnd(alt_c, 0), "h": rnd(hr_c, 0), "p": rnd(pace, 1), "v": rnd(speed, 2), "c": c,
-                       "sd": None if hr_sd is None else round(hr_sd, 1)},
+                       "sd": None if hr_sd is None else round(hr_sd, 1),
+                       **({"pk": peaks} if peaks is not None else {})},   # pk = NH 4000 peaks reached (names only), when the file had GPS
                       separators=(",", ":"))
 
 

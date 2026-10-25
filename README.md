@@ -38,7 +38,12 @@ if it holds you for at least a minute, is compact (90% of points within 8 m of i
 Only that hike's own coordinates are ever looked at, they stay in memory for the length of the calculation, and nothing saved or shown contains a coordinate.
 
 ## Peak tags
-Titles are matched to the 48 peaks automatically, forgiving of "Mt."/"Mount" and small spelling slips ("Waumbeck"). Shorthand such as
+**From your GPS track (preferred).** While a `.fit` file is read, the app checks whether the track came within 250 m of each of the 48 summits (positions in `data/nh4000_summits.csv`,
+published coordinates) while also being at that peak's elevation (within about 100 ft). Every summit reached is tagged, in the order reached, so "Wildcat A and D" or a Franconia Ridge day
+tags itself, and a hike whose title says Lafayette but whose track went over Liberty and Flume is tagged Liberty and Flume. Only the peak *names* are saved with the hike; coordinates are used in memory and discarded.
+GPS-based tags replace title-based guesses (and older saved tags) unless you edit that hike's peaks by hand in the table.
+
+**From the title (fallback, for files without GPS).** Titles are matched to the 48 peaks automatically, forgiving of "Mt."/"Mount" and small spelling slips ("Waumbeck"). Shorthand such as
 "Wildcat A", "Tripyramid" or "Franconia Ridge" lives in `data/peak_aliases.csv` (columns `alias,peaks`; separate several peaks with `|`):
 add your own lines there. Trail names that contain a peak's name but aren't the peak ("Lincoln Woods", "Lincoln Brook", "Zealand Falls") are listed in `data/peak_exclusions.csv` (`phrase,peak`) and ignored when tagging. To keep your edited tags for the default (owner) hikes across sessions and refreshes, use *Save tags only*
 in the app and commit that file as `data/owner_tags.csv`.
