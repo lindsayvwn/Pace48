@@ -626,36 +626,40 @@ with tab1:
     all_rows["include"] = edited["include"].fillna(True).astype(bool).values
     hikes = all_rows[all_rows["include"]].reset_index(drop=True)
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Activities used", f"{len(hikes)} of {len(all_rows)}")
-    m2.metric("Total miles", f"{hikes['distance_mi'].sum():,.2f}")
-    m3.metric("Total climb (ft)", f"{hikes['ascent_ft'].sum():,.2f}")
-    m4.metric("Total hours", f"{hikes['time_hr'].sum():,.2f}")
-    # Which used activities have real data, and which still need a matching .fit/.zip?
-    def _summary(df: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame({
-            "Date": df["date"], "Activity": df["title"], "Source file": df["source_file"],
-            "NH 4000 peaks": df["peaks"].map(lambda ps: ", ".join(ps)),
-            "Miles": df["distance_mi"],
-        })
+    # Collapsed by default (cleaner while the owner's own hikes are showing); opens by itself once a visitor loads their own data,
+    # and can be opened or closed either way. The key changes with that state so the new default applies when it flips.
+    with st.expander("Summary of the activities used", expanded=visitor_uploaded,
+                     key=f"summary-{'own' if visitor_uploaded else 'default'}"):
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Activities used", f"{len(hikes)} of {len(all_rows)}")
+        m2.metric("Total miles", f"{hikes['distance_mi'].sum():,.2f}")
+        m3.metric("Total climb (ft)", f"{hikes['ascent_ft'].sum():,.2f}")
+        m4.metric("Total hours", f"{hikes['time_hr'].sum():,.2f}")
+        # Which used activities have real data, and which still need a matching .fit/.zip?
+        def _summary(df: pd.DataFrame) -> pd.DataFrame:
+            return pd.DataFrame({
+                "Date": df["date"], "Activity": df["title"], "Source file": df["source_file"],
+                "NH 4000 peaks": df["peaks"].map(lambda ps: ", ".join(ps)),
+                "Miles": df["distance_mi"],
+            })
 
-    has_climb = hikes["ascent_ft"].notna()
-    ok_col, missing_col = st.columns(2)
-    with ok_col:
-        st.markdown(f"**✅ With climb data ({int(has_climb.sum())})**")
-        st.caption("Used by the model.")
-        st.dataframe(_summary(hikes[has_climb]), hide_index=True, width="stretch", height=260,
-                     column_config={"Date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
-                                    "Miles": st.column_config.NumberColumn("Miles", format="%.2f")})
-    with missing_col:
-        st.markdown(f"**⚠️ No match / no climb data ({int((~has_climb).sum())})**")
-        st.caption("Left out of the model. Upload each one's .zip (step ②) to fill it in, or untick *Use* above.")
-        if (~has_climb).any():
-            st.dataframe(_summary(hikes[~has_climb]), hide_index=True, width="stretch", height=260,
+        has_climb = hikes["ascent_ft"].notna()
+        ok_col, missing_col = st.columns(2)
+        with ok_col:
+            st.markdown(f"**✅ With climb data ({int(has_climb.sum())})**")
+            st.caption("Used by the model.")
+            st.dataframe(_summary(hikes[has_climb]), hide_index=True, width="stretch", height=260,
                          column_config={"Date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
                                         "Miles": st.column_config.NumberColumn("Miles", format="%.2f")})
-        else:
-            st.success("Every activity you're using has climb data.")
+        with missing_col:
+            st.markdown(f"**⚠️ No match / no climb data ({int((~has_climb).sum())})**")
+            st.caption("Left out of the model. Upload each one's .zip (step ②) to fill it in, or untick *Use* above.")
+            if (~has_climb).any():
+                st.dataframe(_summary(hikes[~has_climb]), hide_index=True, width="stretch", height=260,
+                             column_config={"Date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
+                                            "Miles": st.column_config.NumberColumn("Miles", format="%.2f")})
+            else:
+                st.success("Every activity you're using has climb data.")
 
     st.download_button(
         "💾 Save my hikes (upload this next time)", type="primary",
