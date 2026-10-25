@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -97,13 +98,41 @@ def _owner_cfg() -> dict | None:
     types = g.get("activity_types", gp.DEFAULT_TYPES)
     return {"key": key, "types": tuple([types] if isinstance(types, str) else types),
             "start_date": str(g["start_date"]) if g.get("start_date") else None,
-            "max_new": int(g.get("max_new_per_load", 40))}
+            "max_new": int(g.get("max_new_per_load", 40)),
+            "hidden_dates": tuple(_as_list(g.get("hidden_dates"))),
+            "hidden_ids": tuple(str(i).strip() for i in _as_list(g.get("hidden_activity_ids"))),
+            "show_hidden": str(g.get("show_hidden", False)).strip().lower() in ("true", "1", "yes")}
+
+
+def _as_list(v) -> list:
+    return [] if v is None else ([v] if isinstance(v, (str, int)) else list(v))
+
+
+REFRESH_COOLDOWN_S = 120
+
+
+@st.cache_resource
+def _refresh_state() -> dict:
+    """Server-wide (shared by every visitor), so the 2-minute cooldown can't be dodged by opening a new tab."""
+    return {"last": 0.0}
+
+
+def _hide(df: pd.DataFrame, hidden_dates, hidden_ids) -> pd.DataFrame:
+    """Drop hikes the owner doesn't want shown, by calendar day of the start time or by Garmin activity id."""
+    if df.empty:
+        return df
+    day = pd.to_datetime(df["start_local"], errors="coerce").dt.strftime("%Y-%m-%d")
+    ids = df["source_file"].astype(str).str.replace(r"\.zip$", "", regex=True)
+    drop = day.isin({str(d)[:10] for d in hidden_dates}) | ids.isin(set(hidden_ids))
+    return df[~drop].reset_index(drop=True)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _owner_hikes(_key, key_id, types, start_date, max_new, schema):
-    """Cached for 15 minutes and shared by all visitors. `_key` (underscore) is left out of the cache key on purpose."""
-    return gp.sync(_key, types=types, start_date=start_date, max_new=max_new)
+def _owner_hikes(_key, key_id, types, start_date, max_new, schema, hidden_dates, hidden_ids):
+    """Cached for 15 minutes and shared by all visitors. `_key` (underscore) is left out of the cache key on purpose.
+    Hidden hikes are removed HERE, so they never reach a visitor's page, table, charts or 'Save my hikes' download."""
+    df, notes = gp.sync(_key, types=types, start_date=start_date, max_new=max_new)
+    return _hide(df, hidden_dates, hidden_ids), notes, time.time()
 
 
 # ------------------------------------------------------------------ header
@@ -158,13 +187,15 @@ fit_files = [(f.name, f.getvalue()) for f in (fit_ups or [])]
 # Default: the owner's hikes (if a personal API key is configured). ANY upload by the visitor replaces them.
 visitor_uploaded = bool(csv_up or saved_up or fit_ups or use_demo)
 owner_cfg = _owner_cfg()
-owner_df, owner_notes, owner_error = None, [], None
+owner_df, owner_notes, owner_error, owner_synced = None, [], None, None
 if owner_cfg and not visitor_uploaded:
     try:
         with st.spinner("Loading hikes from Garmin (the first load can take a minute)…"):
-            owner_df, owner_notes = _owner_hikes(
+            _hd = () if owner_cfg["show_hidden"] else owner_cfg["hidden_dates"]
+            _hi = () if owner_cfg["show_hidden"] else owner_cfg["hidden_ids"]
+            owner_df, owner_notes, owner_synced = _owner_hikes(
                 owner_cfg["key"], gp._fingerprint(owner_cfg["key"]), owner_cfg["types"], owner_cfg["start_date"],
-                owner_cfg["max_new"], (tuple(HIKE_COLUMNS), TRACK_VERSION))
+                owner_cfg["max_new"], (tuple(HIKE_COLUMNS), TRACK_VERSION), _hd, _hi)
         if owner_df.empty:
             owner_df, owner_error = None, "Connected to Garmin, but no matching activities were found."
     except gp.PersonalApiError as e:
@@ -227,8 +258,20 @@ for _c in HIKE_COLUMNS:  # belt and braces: never crash on a table that lacks a 
     if _c not in activities.columns:
         activities[_c] = float("nan") if _c in NUMERIC else ""
 if owner_df is not None:
-    st.info("**Showing the app owner's hikes**, pulled from their Garmin account. Upload your own files in the sidebar "
-            "and they replace these.")
+    _bc, _rc = st.columns([4, 1], vertical_alignment="center")
+    _ago = max(int(time.time() - owner_synced), 0) if owner_synced else 0
+    _bc.info("**Showing the app owner's hikes**, pulled from their Garmin account"
+             + (f" (last synced {_ago // 60} min ago)" if _ago >= 60 else " (synced just now)")
+             + ". Upload your own files in the sidebar and they replace these.")
+    if _rc.button("🔄 Refresh Garmin data", help="Re-check Garmin for new hikes. Limited to once every 2 minutes."):
+        _st = _refresh_state()
+        _wait = REFRESH_COOLDOWN_S - (time.time() - _st["last"])
+        if _wait > 0:
+            _rc.warning(f"Refreshed recently. Try again in {int(_wait) + 1} s.")
+        else:
+            _st["last"] = time.time()
+            _owner_hikes.clear()
+            st.rerun()
 for _c in NUMERIC:  # whatever the source (upload, saved file, Garmin sync), numbers must be real numbers for charts
     activities[_c] = pd.to_numeric(activities[_c], errors="coerce")
 for _c in ("start_local", "date"):

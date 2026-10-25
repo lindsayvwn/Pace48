@@ -34,6 +34,10 @@ How it works: `garmin_personal.py` exchanges the key for a token, lists your act
 `.zip`, and runs it through the same reader as an upload, so you get the same moving/stopped time, paces and profiles.
 Parsed hikes are cached in `.cache/` (gitignored) so later loads only download new activities.
 
+**Hiding hikes:** list hikes visitors must not see under `[garmin_personal]` in secrets (not in the repo): `hidden_dates = ["2024-05-31", "2025-01-05"]` (calendar day of the start) and/or `hidden_activity_ids = [...]`. They are removed on the server before anything reaches a visitor, including the "Save my hikes" download. Set `show_hidden = true` locally to see everything.
+
+**Refresh button:** the banner has a "Refresh Garmin data" button that re-checks Garmin for new hikes. Anyone can press it; it is limited to once every 2 minutes for the whole app.
+
 Things to know: everyone who opens your deployed app sees your default hikes (dates, titles, heart rate, elevation profiles),
 so turn it off with `enabled = false`, or don't set a key, if that's not what you want. Check Garmin's terms for the Personal
 API before exposing your data on a public site. On hosts with a temporary disk the cache is rebuilt after each restart.
