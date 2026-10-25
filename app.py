@@ -732,13 +732,13 @@ with tab3:
             f2.update_yaxes(**yax)
             f2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=380, hoverlabel=dict(font_size=14))
             st.plotly_chart(f2, width="stretch")
-            st.caption("Dots on the dotted line = perfect predictions. Hover a dot to see which hike it is.")
+            st.caption("Dotted line = prediction line. Hover a dot to see which hike it is.")
             st.caption(
-                f"**Limitations:** this model is fit on {fit['n']} activit{'y' if fit['n'] == 1 else 'ies'}, a small sample, so a single unusual day "
-                "(an icy hike, a long summit rest, a slow group) can shift it noticeably, and the error figures above are rough. "
-                "It only sees distance and climb, not weather, trail roughness or how tired you were, and it is least reliable for "
+                f"**Limitations:** this model is fit on {fit['n']} activit{'y' if fit['n'] == 1 else 'ies'}. Small samples make these results less reliable, so interpret them with caution."
+                " Additional variables that may influene results are season (winter versus summer), rest times, hiking buddies, etc. These variables can shift results noticeably"
+                "The model only sees only sees distance and climb, not weather, trail roughness or how tired you were, and it is least reliable for "
                 "trips longer or steeper than anything you've logged. More activities, ideally with a mix of lengths and "
-                "climbs, will make the predictions steadier and better."
+                "climbs, will improve predictions."
             )
 
 # ============================================================ TAB 4
