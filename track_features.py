@@ -10,6 +10,10 @@ import json
 import numpy as np
 import pandas as pd
 
+# Bump this whenever the definitions below change (what counts as moving/stopped, how rates are computed). Saved hikes
+# and cached results made with an older version are then recognised as stale instead of being shown as if current.
+TRACK_VERSION = 3
+
 M_PER_MILE = 1609.344
 FT_PER_M = 3.28084
 
@@ -153,8 +157,16 @@ def _profile(df, dist, alt, stops) -> str:
         k = int(np.clip(np.digitize(dist[first], edges) - 1, 0, PROFILE_POINTS - 1))
         stop_min[k] += secs_stopped / 60
     rnd = lambda arr, n: [None if not np.isfinite(x) else round(float(x), n) for x in arr]  # noqa: E731
-    return json.dumps({"d": rnd(centers / M_PER_MILE, 2), "a": rnd(alt_c, 0), "h": rnd(hr_c, 0), "s": rnd(stop_min, 1)},
+    return json.dumps({"v": TRACK_VERSION, "d": rnd(centers / M_PER_MILE, 2), "a": rnd(alt_c, 0), "h": rnd(hr_c, 0), "s": rnd(stop_min, 1)},
                       separators=(",", ":"))
+
+
+def profile_version(profile_json) -> int:
+    """Version of the definitions a saved profile was made with (0 = unknown/older, or no profile)."""
+    try:
+        return int(json.loads(profile_json).get("v", 0))
+    except Exception:
+        return 0
 
 
 def profile_frame(profile_json: str) -> pd.DataFrame | None:

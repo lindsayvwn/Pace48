@@ -19,7 +19,7 @@ from garmin_io import HIKE_COLUMNS, NUMERIC, activity_key, combine_saved, load_a
 from tags_io import hikes_from_csv, hikes_to_csv, tags_from_csv, tags_to_csv
 from model import (FEATURES, MIN_HIKES_FOR_MOVING_MODEL, MIN_HIKES_FOR_REGRESSION, TARGET, MovingStopModel, PaceModel,
                    fit_regression, predict, simple_loo_mae)
-from track_features import profile_frame
+from track_features import TRACK_NUMERIC, TRACK_VERSION, profile_frame, profile_version
 
 HERE = Path(__file__).parent
 PEAKS = pd.read_csv(HERE / "data" / "nh4000_peaks.csv")
@@ -153,12 +153,21 @@ loader = st.empty()
 loader.markdown(LOADER_HTML, unsafe_allow_html=True)
 try:
     if csv_bytes is not None:
-        activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit, tuple(HIKE_COLUMNS))
+        activities, notes = _load(csv_bytes, tuple(fit_files), dist_unit, elev_unit, (tuple(HIKE_COLUMNS), TRACK_VERSION))
     else:
         activities, notes = pd.DataFrame(columns=HIKE_COLUMNS), []
         if fit_files:
             notes.append("Upload the matching Activities.csv too, so new .fit files get their titles.")
     saved_df = hikes_from_csv(saved_up.getvalue()) if saved_up is not None else None
+    if saved_df is not None:
+        # track data (stops, paces, profile) made by an older version used different definitions: clear it, don't mix
+        stale = saved_df["moving_hr"].notna() & (saved_df["profile"].map(profile_version) != TRACK_VERSION)
+        if stale.any():
+            saved_df.loc[stale, TRACK_NUMERIC] = float("nan")
+            saved_df.loc[stale, "profile"] = ""
+            notes.append(f"{int(stale.sum())} saved hike(s) had stop and pace data from an older version of the app, so I "
+                         "cleared it. Re-upload those hikes' .zip files to refresh it. Total times saved by an older version "
+                         "may also be shorter, because they left out paused time.")
 except ValueError as e:
     loader.empty()
     st.error(str(e))
@@ -458,7 +467,7 @@ with tab_prof:
                                          line=dict(color=ACCENT), fillcolor="rgba(46,111,87,0.25)"), secondary_y=False)
                 fig.add_trace(go.Scatter(x=pf["miles"], y=pf["heart_rate"], name="Heart rate (bpm)",
                                          line=dict(color="#C0392B", width=1.5)), secondary_y=True)
-                stops = pf[pf["stop_min"] > 0]
+                stops = pf[pf["stop_min"] >= 3]   # every real stop is 3+ minutes
                 if len(stops):
                     fig.add_trace(go.Scatter(
                         x=stops["miles"], y=stops["altitude_ft"], mode="markers", name="Stops (3+ min)",
@@ -466,7 +475,7 @@ with tab_prof:
                                     line=dict(color="white", width=1)),
                         text=[f"stopped about {m:.0f} min" for m in stops["stop_min"]], hoverinfo="text+x"), secondary_y=False)
                 lo_a, hi_a = float(pf["altitude_ft"].min()), float(pf["altitude_ft"].max())
-                fig.update_yaxes(title_text="Elevation (ft)", range=[lo_a - 150, hi_a + 150], secondary_y=False)
+                fig.update_yaxes(title_text="Elevation (ft)", range=[lo_a - 150, hi_a + 400], secondary_y=False)
                 fig.update_yaxes(title_text="Heart rate (bpm)", secondary_y=True)
                 fig.update_xaxes(title_text="Miles from start")
                 fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400, legend=dict(orientation="h", y=1.12))
