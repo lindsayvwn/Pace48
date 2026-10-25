@@ -22,7 +22,7 @@ from garmin_io import HIKE_COLUMNS, NUMERIC, activity_key, combine_saved, load_a
 from tags_io import hikes_from_csv, hikes_to_csv, tags_from_csv, tags_to_csv
 from model import (FEATURES, MIN_HIKES_FOR_MOVING_MODEL, MIN_HIKES_FOR_REGRESSION, TARGET, MovingStopModel, PaceModel,
                    fit_regression, predict, simple_loo_mae)
-from track_features import (DEFAULT_HR_DROP_PCT, DEFAULT_MIN_STOP_S, TRACK_NUMERIC, TRACK_VERSION, apply_stop_rules,
+from track_features import (DEFAULT_HR_DROP_SD, DEFAULT_MIN_STOP_S, TRACK_NUMERIC, TRACK_VERSION, apply_stop_rules,
                             profile_frame, profile_version)
 
 HERE = Path(__file__).parent
@@ -165,11 +165,13 @@ with st.sidebar:
     with st.expander("Stop detection (advanced)"):
         stop_min_min = st.slider("Shortest break to count (minutes)", 1, 10, DEFAULT_MIN_STOP_S // 60,
                                  help="A slow or still stretch shorter than this counts as moving.")
-        hr_drop = st.slider("Heart-rate drop that proves a rest (%)", 0, 25, int(DEFAULT_HR_DROP_PCT),
-                            help="On ice or scrambling your watch can look 'stopped' while you are working hard. A slow stretch only "
-                                 "counts as a break if your heart rate fell by at least this much below where it was while moving "
-                                 "(or the watch timer paused). Slow stretches that don't qualify are shown as 'slow technical' "
-                                 "and counted as moving. 0 = ignore heart rate.")
+        hr_drop = st.slider("Heart-rate drop that proves a rest (standard deviations)", 0.0, 3.0, float(DEFAULT_HR_DROP_SD), 0.25,
+                            help="Each hike is judged against itself: the app measures how much YOUR heart rate normally varies "
+                                 "while you move on that hike (one standard deviation, often 10-15 bpm). On ice or scrambling the watch "
+                                 "can look 'stopped' while you are working hard. A slow stretch only counts as a break if your heart "
+                                 "rate fell at least this many standard deviations below where it was while moving, or the watch "
+                                 "timer paused. Other slow stretches are shown as 'slow technical' and counted as moving. "
+                                 "Higher = fewer breaks. 0 = ignore heart rate.")
     c1, c2 = st.columns(2)
     dist_unit = c1.radio("CSV distance", ["mi", "km"], horizontal=True)
     elev_unit = c2.radio("CSV elevation", ["ft", "m"], horizontal=True)
@@ -625,9 +627,10 @@ with tab_prof:
             f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?")
             c2.plotly_chart(f2, width="stretch")
         st.caption("A stop is a break: a stretch at or above the shortest-break setting (sidebar, default 3 minutes) where you covered "
-                   "less than about 0.7 mph over 30 seconds (counting height gained as well as ground covered, so scrambling "
+                   "less than about a quarter of your typical moving speed on that hike (at most 0.7 mph) over 30 seconds (counting height gained as well as ground covered, so scrambling "
                    "isn't mistaken for standing still; the watch's own speed reading drops to zero too often to trust) AND either the "
-                   "watch's timer paused or your heart rate fell. Slow stretches where it stayed up, like ice or rock, are 'slow technical' "
+                   "watch's timer paused or your heart rate fell by the sidebar's number of standard deviations (measured on that hike's own "
+                   "moving heart rate). Slow stretches where it stayed up, like ice or rock, are 'slow technical' "
                    "time and count as moving. Grade is measured over about 100 m of trail from smoothed barometric "
                    "altitude, so short scrambles are averaged out. Peak predictions use distance and total climb because "
                    "the reference routes don't include steepness data yet.")
