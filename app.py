@@ -140,7 +140,7 @@ TAB_CSS = """
   background: linear-gradient(to bottom, rgba(255,140,140,0.60), rgba(255,170,170,0.28));
   border-color: rgba(205,60,60,0.90); border-bottom: 3px solid rgba(205,60,60,0.95);
 }
-[role="tablist"] [role="tab"][aria-selected="true"] p { color: inherit !important; }
+[role="tablist"] [role="tab"][aria-selected="true"], [role="tablist"] [role="tab"][aria-selected="true"] p { color: var(--st-text-color, inherit) !important; }   /* standard text colour, not the red accent */
 [role="tablist"] .react-aria-SelectionIndicator, [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] { display: none !important; }   /* the raised tab replaces the sliding underline */
 </style>
 """
