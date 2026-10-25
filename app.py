@@ -6,6 +6,7 @@ the app learns YOUR pace and predicts how long any of the 48 peaks will take you
 from __future__ import annotations
 
 import os
+import difflib
 import re
 import time
 from pathlib import Path
@@ -110,15 +111,67 @@ LOADER_HTML = """
 """
 
 
+ALIASES_CSV = HERE / "data" / "peak_aliases.csv"
+OWNER_TAGS_CSV = HERE / "data" / "owner_tags.csv"
+_FILLER = {"mt", "mount", "mountain", "mtn"}
+FUZZY_MIN_LEN, FUZZY_RATIO = 6, 0.86
+
+
+def _norm(text: str) -> list[str]:
+    """Lower-case word list without punctuation and without 'Mt' / 'Mount' / 'Mountain'."""
+    return [w for w in re.sub(r"[^a-z0-9 ]", " ", str(text).lower()).split() if w not in _FILLER]
+
+
+def _phrase_in(title_words: list[str], phrase: list[str]) -> bool:
+    """Phrase appears in the title, allowing small spelling slips (Waumbeck, Trypyramid) for names of 6+ letters."""
+    n = len(phrase)
+    if not n or n > len(title_words):
+        return False
+    target = " ".join(phrase)
+    for i in range(len(title_words) - n + 1):
+        cand = " ".join(title_words[i:i + n])
+        if cand == target or (len(target) >= FUZZY_MIN_LEN and difflib.SequenceMatcher(None, cand, target).ratio() >= FUZZY_RATIO):
+            return True
+    return False
+
+
+@st.cache_data(show_spinner=False)
+def _alias_table() -> list[tuple[list[str], list[str]]]:
+    """data/peak_aliases.csv: 'alias,peaks' (peaks separated by |). Edit it to teach the app your own shorthand."""
+    try:
+        df = pd.read_csv(ALIASES_CSV, dtype=str, keep_default_na=False)
+    except Exception:
+        return []
+    known = set(PEAKS["peak"])
+    out = []
+    for _, r in df.iterrows():
+        peaks = [p.strip() for p in r["peaks"].split("|") if p.strip() in known]
+        if r["alias"].strip() and peaks:
+            out.append((_norm(r["alias"]), peaks))
+    return out
+
+
 def suggest_peaks(title: str) -> list[str]:
-    """Pre-fill peak tags when the activity title mentions a peak (user can edit)."""
-    t = " " + " ".join(re.sub(r"[^a-z0-9 ]", " ", title.lower()).split()) + " "
-    found = []
+    """Pre-fill peak tags from the activity title (user can edit): exact or near-spelling matches of the 48 names,
+    plus the shorthand in data/peak_aliases.csv ('Wildcat A', 'Tripyramid', 'Franconia Ridge'...)."""
+    words = _norm(title)
+    found: list[str] = []
     for p in PEAKS["peak"]:
-        key = " " + " ".join(re.sub(r"[^a-z0-9 ]", " ", p.lower()).split()) + " "
-        if key in t:
+        if _phrase_in(words, _norm(p)):
             found.append(p)
+    for alias_words, peaks in _alias_table():
+        if _phrase_in(words, alias_words):
+            found += [p for p in peaks if p not in found]
     return found
+
+
+@st.cache_data(show_spinner=False)
+def _owner_tag_defaults() -> dict:
+    """data/owner_tags.csv (optional): the owner's saved tags-only file, so their peak tags survive new sessions and refreshes."""
+    try:
+        return tags_from_csv(OWNER_TAGS_CSV.read_bytes())
+    except Exception:
+        return {}
 
 
 # ------------------------------------------------------- owner's default data (Garmin Personal API)
@@ -419,8 +472,13 @@ if tags_up is not None:
             st.session_state["tags_sig"] = sig
 
 all_rows["key"] = [activity_key(a, d, m) for a, d, m in zip(all_rows["start_local"], all_rows["date"], all_rows["distance_mi"])]
+if owner_df is not None:   # the owner's committed tags (data/owner_tags.csv) are the starting point for their hikes
+    for _k, _v in _owner_tag_defaults().items():
+        tags.setdefault(_k, dict(_v))
 for _, r in all_rows.iterrows():
-    entry = tags.setdefault(r["key"], {"peaks": suggest_peaks(r["title"]), "include": True})
+    entry = tags.setdefault(r["key"], {"peaks": [], "include": True, "auto": True})
+    if entry.get("auto") and not entry["peaks"]:   # still untouched by the user: keep (re)suggesting from the title
+        entry["peaks"] = suggest_peaks(r["title"])
     entry.update(date=f"{r['date']:%Y-%m-%d}" if pd.notna(r["date"]) else "", title=r["title"],
                  distance_mi=round(float(r["distance_mi"]), 2) if pd.notna(r["distance_mi"]) else "")
 
@@ -485,6 +543,8 @@ with tab1:
     edited = st.data_editor(
         st.session_state[base_key],
         key=editor_key, hide_index=True, width="stretch",
+        column_order=["include", "date", "nh4000", "title", "distance_mi", "ascent_ft", "time_hr", "moving_hr", "stopped_hr",
+                      "avg_hr", "source_file", "match", "activity_type"],
         disabled=["date", "title", "source_file", "match", "activity_type", "distance_mi", "ascent_ft", "time_hr",
                   "moving_hr", "stopped_hr", "avg_hr"],
         column_config={
@@ -507,6 +567,8 @@ with tab1:
     # write edits back into the persistent store
     clean_peaks = edited["nh4000"].apply(lambda v: list(v) if isinstance(v, (list, tuple, np.ndarray)) else [])
     for k, inc, pk in zip(all_rows["key"], edited["include"].fillna(True), clean_peaks):
+        if list(pk) != list(tags[k]["peaks"]):
+            tags[k]["auto"] = False   # the user changed it: never overwrite it with a title guess again
         tags[k]["include"], tags[k]["peaks"] = bool(inc), pk
     all_rows["peaks"] = clean_peaks.values
     all_rows["include"] = edited["include"].fillna(True).astype(bool).values

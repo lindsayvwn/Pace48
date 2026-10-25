@@ -30,6 +30,12 @@ gained, Naismith-style: 1 m climbed counts like 8 m walked, so steep scrambling 
 are shown as *slow technical* and count as moving. Both numbers can be changed in the sidebar under "Stop detection (advanced)"; the raw
 slow stretches are saved with each hike, so changing them is instant. This is unsupervised: no labelled breaks, so treat the default as a starting point.
 
+## Peak tags
+Titles are matched to the 48 peaks automatically, forgiving of "Mt."/"Mount" and small spelling slips ("Waumbeck"). Shorthand such as
+"Wildcat A", "Tripyramid" or "Franconia Ridge" lives in `data/peak_aliases.csv` (columns `alias,peaks`; separate several peaks with `|`):
+add your own lines there. To keep your edited tags for the default (owner) hikes across sessions and refreshes, use *Save tags only*
+in the app and commit that file as `data/owner_tags.csv`.
+
 ## Default dashboard from your own Garmin (optional, owner only)
 Want the app to open on *your* hikes instead of an empty upload page? Add a Garmin **Personal API** key:
 

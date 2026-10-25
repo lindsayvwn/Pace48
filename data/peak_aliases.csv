@@ -1,0 +1,10 @@
+alias,peaks
+wildcat a,"Wildcat, A peak"
+wildcat a peak,"Wildcat, A peak"
+wildcat d,"Wildcat, D Peak"
+wildcat d peak,"Wildcat, D Peak"
+tripyramid,Middle Tripyramid|North Tripyramid
+kinsman,North Kinsman|South Kinsman
+franconia ridge,Lafayette|Lincoln
+south hancock,South Hancock
+bond,Bond
