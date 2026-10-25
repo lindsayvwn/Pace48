@@ -571,12 +571,11 @@ with tab_prof:
             if pf is None:
                 st.warning("Couldn't read this hike's profile.")
             else:
-                has_pace_col = pf["pace_min_mi"].notna().any()
-                metric = st.radio("Show on the chart", ["Pace", "Heart rate"], horizontal=True,
-                                  index=0 if has_pace_col else 1, key="profile_metric")
-                if metric == "Pace" and not has_pace_col:
-                    st.info("This hike's saved profile has no pace data (saved by an older version). Re-upload its .zip to add it. "
-                            "Showing heart rate instead.")
+                col_of = {"Pace": "pace_min_mi", "Speed": "speed_mph", "Heart rate": "heart_rate"}
+                metric = st.radio("Show on the chart", list(col_of), horizontal=True, key="profile_metric")
+                if not pf[col_of[metric]].notna().any():
+                    st.info(f"This hike's saved profile has no {metric.lower()} data (saved by an older version). Re-upload its .zip "
+                            "to add it. Showing heart rate instead.")
                     metric = "Heart rate"
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
                 fig.add_trace(go.Scatter(x=pf["miles"], y=pf["altitude_ft"], name="Elevation (ft)", fill="tozeroy",
@@ -585,6 +584,10 @@ with tab_prof:
                     fig.add_trace(go.Scatter(x=pf["miles"], y=pf["pace_min_mi"], name="Pace (min/mi)",
                                              line=dict(color="#2C5AA0", width=1.5), connectgaps=False,
                                              hovertemplate="%{y:.1f} min/mi<extra></extra>"), secondary_y=True)
+                elif metric == "Speed":
+                    fig.add_trace(go.Scatter(x=pf["miles"], y=pf["speed_mph"], name="Speed (mph)",
+                                             line=dict(color="#2C5AA0", width=1.5),
+                                             hovertemplate="%{y:.2f} mph<extra></extra>"), secondary_y=True)
                 else:
                     fig.add_trace(go.Scatter(x=pf["miles"], y=pf["heart_rate"], name="Heart rate (bpm)",
                                              line=dict(color="#C0392B", width=1.5)), secondary_y=True)
@@ -607,6 +610,8 @@ with tab_prof:
                 fig.update_yaxes(title_text="Elevation (ft)", range=[lo_a - 150, hi_a + 400], secondary_y=False)
                 if metric == "Pace":
                     fig.update_yaxes(title_text="Moving pace (min/mi, faster is up)", autorange="reversed", secondary_y=True)
+                elif metric == "Speed":
+                    fig.update_yaxes(title_text="Speed over elapsed time (mph, rests included)", rangemode="tozero", secondary_y=True)
                 else:
                     fig.update_yaxes(title_text="Heart rate (bpm)", secondary_y=True)
                 fig.update_xaxes(title_text="Miles from start")
