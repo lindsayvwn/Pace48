@@ -260,9 +260,9 @@ for _c in HIKE_COLUMNS:  # belt and braces: never crash on a table that lacks a 
 if owner_df is not None:
     _bc, _rc = st.columns([4, 1], vertical_alignment="center")
     _ago = max(int(time.time() - owner_synced), 0) if owner_synced else 0
-    _bc.info("**Showing the app owner's hikes**, pulled from their Garmin account"
+    _bc.info("**Showing selected hikes from the app owner**, pulled from their Garmin account"
              + (f" (last synced {_ago // 60} min ago)" if _ago >= 60 else " (synced just now)")
-             + ". Upload your own files in the sidebar and they replace these.")
+             + ". Upload your own files in the sidebar and they replace these. Alternatively, you can clone the repository and run it locally with our personal API.")
     if _rc.button("🔄 Refresh Garmin data", help="Re-check Garmin for new hikes. Limited to once every 2 minutes."):
         _st = _refresh_state()
         _wait = REFRESH_COOLDOWN_S - (time.time() - _st["last"])
@@ -396,6 +396,8 @@ with tab1:
     st.markdown(
         "**Tick the activities to use, and tag any NH 4000-footers.** Untick *Use* to leave an activity out of every "
         "chart and model. Pick peak(s) in the *NH 4000 peaks* column (some are pre-filled from the title)."
+        "Why might you want to *untick* an activity? Depending on your goals, you might want to exclude certain activities from analysis or visualization."
+        "For example, if you went on a hike with a group and your pace was significantly slower than usual, you might want to untick that activity to avoid skewing the results."
     )
     edited = st.data_editor(
         st.session_state[base_key],
