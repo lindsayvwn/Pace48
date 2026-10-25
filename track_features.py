@@ -12,7 +12,7 @@ import pandas as pd
 
 # Bump this whenever the definitions below change (what counts as moving/stopped, how rates are computed). Saved hikes
 # and cached results made with an older version are then recognised as stale instead of being shown as if current.
-TRACK_VERSION = 6
+TRACK_VERSION = 7
 
 M_PER_MILE = 1609.344
 FT_PER_M = 3.28084
@@ -21,7 +21,7 @@ FT_PER_M = 3.28084
 # for stretches of a hike while distance keeps advancing, which made a hike look 37% stopped when it was ~13%.
 MOVING_MPS = 0.5          # slow = covering less than this (about 1.1 mph) over WINDOW_S; never higher (see ADAPT_FRAC below). Deliberately
                           # generous: standing around at a summit wanders at 0.1-0.5 m/s of GPS drift. Heart rate decides if it was a rest.
-                          # Distance is 3D (ground distance AND height gained), so scrambling straight up rock counts as moving.
+                          # Progress counts height gained too (Naismith-style), so a slow scramble straight up rock counts as moving.
 WINDOW_S = 45             # distance covered in a 45 s window centred on each record
 MAX_STEP_S = 30           # a gap between records longer than this is a pause (timer stopped), not movement. Watches on 'smart
                           # recording' write a point only every 5-10 s, so a gap of a few seconds is normal, NOT a pause.
@@ -35,6 +35,7 @@ MERGE_GAP_S = 120         # a rest interrupted by under a minute of apparent mov
 #    on that hike, robustly measured). Otherwise (ice, scrambling) it is "slow technical": still effort, counted as moving.
 # The app lets the viewer change the length and the SD number, so the raw candidates are saved with each hike.
 ADAPT_FRAC, MIN_MOVING_MPS = 0.4, 0.2
+CLIMB_WEIGHT, DESCENT_WEIGHT = 8.0, 3.0
 DEFAULT_MIN_STOP_S = MIN_STOP_S
 DEFAULT_HR_DROP_SD = 2.0
 MIN_CANDIDATE_S = 60      # slow stretches at least this long are saved, so the min-stop slider can go down to 1 minute
@@ -78,7 +79,9 @@ def extract(ts, dist_m, alt_m, hr, elapsed_s: float) -> dict:
     half = WINDOW_S / 2
     flat_m = np.interp(secs + half, secs, dist) - np.interp(secs - half, secs, dist)
     up_m = np.interp(secs + half, secs, alt) - np.interp(secs - half, secs, alt)
-    travelled = np.hypot(flat_m, up_m)   # 3D distance over the window
+    # progress over the window in 'flat-ground equivalent' metres (Naismith's rule: 1 m climbed ~ 8 m walked; steep descent ~ 3 m).
+    # A slow scramble up a steep slope covers little ground but a lot of climb: that is progress, not standing still.
+    travelled = flat_m + CLIMB_WEIGHT * np.clip(up_m, 0, None) + DESCENT_WEIGHT * np.clip(-up_m, 0, None)
     speed = travelled / WINDOW_S
     typical = speed[speed >= MOVING_MPS]
     thresh = float(np.clip(ADAPT_FRAC * np.median(typical), MIN_MOVING_MPS, MOVING_MPS)) if len(typical) >= 30 else MOVING_MPS

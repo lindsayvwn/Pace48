@@ -646,11 +646,12 @@ with tab_prof:
                             color_discrete_sequence=[ACCENT])
             f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?")
             c2.plotly_chart(f2, width="stretch")
-        st.caption("A stop is a break: a stretch at or above the shortest-break setting (sidebar, default 3 minutes) where you covered "
-                   "less than about 40% of your typical moving speed on that hike (at most about 1 mph) over 45 seconds (counting height gained as well as ground covered, so scrambling "
-                   "isn't mistaken for standing still; the watch's own speed reading drops to zero too often to trust) AND either the "
+        st.caption("A stop is a break: a stretch at or above the shortest-break setting (sidebar, default 3 minutes) where you made "
+                   "almost no progress (under about 40% of your typical moving speed on that hike, over 45 seconds; climbing counts "
+                   "as progress, 1 m up is worth about 8 m of flat ground, so a slow scramble isn't mistaken for standing still; the "
+                   "watch's own speed reading drops to zero too often to trust) AND either the "
                    "watch's timer paused or your heart rate fell by the sidebar's number of standard deviations (measured on that hike's own "
-                   "moving heart rate). Slow stretches where it stayed up, like ice or rock, are 'slow technical' "
+                   "minute-to-minute heart-rate variation). Slow stretches where it stayed up, like ice or rock, are 'slow technical' "
                    "time and count as moving. Grade is measured over about 100 m of trail from smoothed barometric "
                    "altitude, so short scrambles are averaged out. Peak predictions use distance and total climb because "
                    "the reference routes don't include steepness data yet.")
