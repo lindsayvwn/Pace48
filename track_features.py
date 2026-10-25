@@ -12,18 +12,27 @@ import pandas as pd
 
 # Bump this whenever the definitions below change (what counts as moving/stopped, how rates are computed). Saved hikes
 # and cached results made with an older version are then recognised as stale instead of being shown as if current.
-TRACK_VERSION = 3
+TRACK_VERSION = 4
 
 M_PER_MILE = 1609.344
 FT_PER_M = 3.28084
 
 # "Stopped" is judged from how far you actually travelled, NOT from the watch's speed field: that field reads exactly 0
 # for stretches of a hike while distance keeps advancing, which made a hike look 37% stopped when it was ~13%.
-MOVING_MPS = 0.3          # covering less than this (about 0.7 mph) over WINDOW_S counts as stopped
+MOVING_MPS = 0.3          # covering less than this (about 0.7 mph) over WINDOW_S counts as stopped.
+                          # Distance is 3D (ground distance AND height gained), so scrambling straight up rock counts as moving.
 WINDOW_S = 30             # distance covered in a 30 s window centred on each record
 MAX_STEP_S = 5            # a gap between records longer than this is a pause (timer stopped), not movement
 MIN_STOP_S = 180          # a "stop" is a break of at least 3 minutes; shorter slowdowns count as part of moving
 MERGE_GAP_S = 30          # a rest interrupted by under 30 s of movement (GPS wobble) is still one stop
+# A slow stretch of 3+ minutes is a BREAK only if you actually rested: the watch timer paused, or your heart rate fell
+# at least DEFAULT_HR_DROP_PCT below where it was while you were moving. Otherwise (ice, scrambling) it is "slow technical"
+# time: still effort, counted as moving. The app lets the viewer change both numbers, so the raw candidates are saved.
+DEFAULT_MIN_STOP_S = MIN_STOP_S
+DEFAULT_HR_DROP_PCT = 8.0
+MIN_CANDIDATE_S = 60      # slow stretches at least this long are saved, so the min-stop slider can go down to 1 minute
+PAUSED_BREAK_FRAC = 0.6   # a slow stretch that is mostly timer-paused is always a break
+HR_BASELINE_S = 300       # "where your heart rate was while moving" = the 5 minutes before the slow stretch
 SMOOTH_SAMPLES = 15       # altitude smoothing (barometric altitude is noisy second to second)
 GRADE_HALF_WINDOW_M = 50  # grade is measured over ~100 m of trail
 MODERATE, STEEP = 5.0, 15.0   # grade thresholds, percent
@@ -58,10 +67,12 @@ def extract(ts, dist_m, alt_m, hr, elapsed_s: float) -> dict:
     dt = np.minimum(dt_raw, MAX_STEP_S)
     dist = np.maximum.accumulate(df["d"].to_numpy())
     secs = (df["t"] - df["t"].iloc[0]).dt.total_seconds().to_numpy()
-    travelled = np.interp(secs + WINDOW_S / 2, secs, dist) - np.interp(secs - WINDOW_S / 2, secs, dist)
-    moving = (travelled / WINDOW_S >= MOVING_MPS) & (dt_raw <= MAX_STEP_S)
-
     alt = df["a"].rolling(SMOOTH_SAMPLES, center=True, min_periods=1).mean().to_numpy()
+    half = WINDOW_S / 2
+    flat_m = np.interp(secs + half, secs, dist) - np.interp(secs - half, secs, dist)
+    up_m = np.interp(secs + half, secs, alt) - np.interp(secs - half, secs, alt)
+    travelled = np.hypot(flat_m, up_m)   # 3D distance over the window
+    moving = (travelled / WINDOW_S >= MOVING_MPS) & (dt_raw <= MAX_STEP_S)
 
     # grade at each record: altitude change over +/-50 m of distance
     g = pd.DataFrame({"d": dist, "a": alt}).groupby("d", as_index=False).mean()
@@ -81,15 +92,21 @@ def extract(ts, dist_m, alt_m, hr, elapsed_s: float) -> dict:
         "down": grade <= -MODERATE,
     }
 
+    cands = find_candidates(secs, moving, dt_raw, df["h"].to_numpy(), dist)
+    # slow technical stretches (effort without rest) are still hiking: count them as moving for the pace numbers too
+    moving = moving.copy()
+    for c in cands:
+        if c["secs"] >= DEFAULT_MIN_STOP_S and not is_break(c, DEFAULT_MIN_STOP_S, DEFAULT_HR_DROP_PCT):
+            moving[c["first"]:c["last"] + 1] = True
+
     def tot(mask, arr):
         return float(np.sum(arr[mask & moving]))
 
-    stops = find_stops(secs, moving, dt_raw)
-    stopped_s = sum(d for _, _, d in stops)
+    stopped_s = sum(c["secs"] for c in cands if c["secs"] >= DEFAULT_MIN_STOP_S and is_break(c, DEFAULT_MIN_STOP_S, DEFAULT_HR_DROP_PCT))
     if elapsed_s:
         stopped_s = min(stopped_s, float(elapsed_s))
         out["stopped_hr"] = stopped_s / 3600
-        out["moving_hr"] = (float(elapsed_s) - stopped_s) / 3600   # everything that isn't a 3+ minute stop
+        out["moving_hr"] = (float(elapsed_s) - stopped_s) / 3600   # everything that isn't a break
     else:
         out["moving_hr"] = float(np.sum(dt[moving])) / 3600
 
@@ -113,12 +130,13 @@ def extract(ts, dist_m, alt_m, hr, elapsed_s: float) -> dict:
     if all_up_m > 0:
         out["steep_ascent_pct"] = 100 * tot(bins["steep_up"], np.clip(dalt, 0, None)) / all_up_m
 
-    out["profile"] = _profile(df, dist, alt, stops)
+    out["profile"] = _profile(df, dist, alt, cands)
     return out
 
 
-def find_stops(secs, moving, dt_raw) -> list[tuple[int, int, float]]:
-    """Breaks of at least MIN_STOP_S: [(first_record, last_record, seconds)]. Paused-timer gaps count as stopped time."""
+def find_candidates(secs, moving, dt_raw, hr, dist) -> list[dict]:
+    """Every slow/still stretch of at least MIN_CANDIDATE_S, with what is needed to tell a rest from slow going:
+    seconds, how much of it was timer-paused, and how far heart rate fell below its level while moving."""
     runs, i, n = [], 0, len(secs)
     while i < n:
         if moving[i]:
@@ -135,11 +153,40 @@ def find_stops(secs, moving, dt_raw) -> list[tuple[int, int, float]]:
             merged[-1][1], merged[-1][3] = r[1], r[3]
         else:
             merged.append(r)
-    return [(a, b, e - s) for a, b, s, e in merged if e - s >= MIN_STOP_S]
+    hr = np.asarray(hr, dtype=float)
+    moving_hr_all = hr[moving & np.isfinite(hr)]
+    overall = float(np.median(moving_hr_all)) if len(moving_hr_all) >= 30 else np.nan
+    out = []
+    for first, last, s0, e0 in merged:
+        dur = e0 - s0
+        if dur < MIN_CANDIDATE_S:
+            continue
+        seg = slice(first, last + 1)
+        gaps = dt_raw[seg]
+        paused = float(np.sum(gaps[gaps > MAX_STEP_S]))
+        base_mask = moving & (secs >= s0 - HR_BASELINE_S) & (secs < s0) & np.isfinite(hr)
+        base = float(np.mean(hr[base_mask])) if base_mask.sum() >= 20 else overall
+        in_run = (secs >= s0 + dur / 2) & (secs <= e0) & np.isfinite(hr)   # second half: heart rate lags behind a rest
+        if in_run.sum() < 3:
+            in_run = (secs >= s0) & (secs <= e0) & np.isfinite(hr)
+        drop = (base - float(np.mean(hr[in_run]))) / base * 100 if (np.isfinite(base) and base > 0 and in_run.sum() >= 3) else None
+        out.append({"first": first, "last": last, "secs": float(dur), "paused_frac": min(paused / dur, 1.0) if dur else 0.0,
+                    "hr_drop": drop, "mile": float(dist[first]) / M_PER_MILE})
+    return out
 
 
-def _profile(df, dist, alt, stops) -> str:
-    """~80 evenly spaced points along the route: miles, altitude (ft), heart rate (bpm), minutes of 3+ minute stops there."""
+def is_break(c: dict, min_stop_s: float, hr_drop_pct: float) -> bool:
+    """A slow stretch that is long enough AND a real rest: timer paused, no heart-rate data to judge by, or heart rate fell."""
+    if c["secs"] < min_stop_s:
+        return False
+    if c["paused_frac"] >= PAUSED_BREAK_FRAC or c["hr_drop"] is None or hr_drop_pct <= 0:
+        return True
+    return c["hr_drop"] >= hr_drop_pct
+
+
+def _profile(df, dist, alt, cands) -> str:
+    """~80 evenly spaced points along the route: miles, altitude (ft), heart rate (bpm); plus the slow stretches ("c"):
+    [mile, seconds, % of it timer-paused, heart-rate drop % or null], so stop rules can be re-applied without the .fit file."""
     total = dist[-1]
     edges = np.linspace(0, total, PROFILE_POINTS + 1)
     centers = (edges[:-1] + edges[1:]) / 2
@@ -152,12 +199,10 @@ def _profile(df, dist, alt, stops) -> str:
         hr_c = np.interp(centers, gh["d"], gh["h"])
     else:
         hr_c = np.full(PROFILE_POINTS, np.nan)
-    stop_min = np.zeros(PROFILE_POINTS)
-    for first, _last, secs_stopped in stops:   # each stop is credited, whole, to where it began
-        k = int(np.clip(np.digitize(dist[first], edges) - 1, 0, PROFILE_POINTS - 1))
-        stop_min[k] += secs_stopped / 60
     rnd = lambda arr, n: [None if not np.isfinite(x) else round(float(x), n) for x in arr]  # noqa: E731
-    return json.dumps({"v": TRACK_VERSION, "d": rnd(centers / M_PER_MILE, 2), "a": rnd(alt_c, 0), "h": rnd(hr_c, 0), "s": rnd(stop_min, 1)},
+    c = [[round(x["mile"], 2), int(round(x["secs"])), round(x["paused_frac"], 2),
+          None if x["hr_drop"] is None else round(x["hr_drop"], 1)] for x in cands]
+    return json.dumps({"v": TRACK_VERSION, "d": rnd(centers / M_PER_MILE, 2), "a": rnd(alt_c, 0), "h": rnd(hr_c, 0), "c": c},
                       separators=(",", ":"))
 
 
@@ -169,12 +214,56 @@ def profile_version(profile_json) -> int:
         return 0
 
 
-def profile_frame(profile_json: str) -> pd.DataFrame | None:
-    """Saved profile string -> DataFrame(miles, altitude_ft, heart_rate, stop_min), or None."""
+def _cands_from_profile(p: dict) -> list[dict]:
+    return [{"mile": m, "secs": float(sec), "paused_frac": pf, "hr_drop": hd} for m, sec, pf, hd in p.get("c", [])]
+
+
+def stop_totals(profile_json, min_stop_s: float = DEFAULT_MIN_STOP_S, hr_drop_pct: float = DEFAULT_HR_DROP_PCT):
+    """(break seconds, slow-technical seconds) for one hike under the given rules, or None if it has no saved candidates."""
+    try:
+        p = json.loads(profile_json)
+        if "c" not in p:
+            return None
+    except Exception:
+        return None
+    cs = [c for c in _cands_from_profile(p) if c["secs"] >= min_stop_s]
+    br = sum(c["secs"] for c in cs if is_break(c, min_stop_s, hr_drop_pct))
+    return br, sum(c["secs"] for c in cs) - br
+
+
+def apply_stop_rules(df: pd.DataFrame, min_stop_s: float, hr_drop_pct: float) -> pd.DataFrame:
+    """Recompute stopped/moving hours (and add slow_technical_hr) from each hike's saved slow stretches."""
+    df = df.copy()
+    df["slow_technical_hr"] = float("nan")
+    for i, prof in df["profile"].items():
+        tt = stop_totals(prof, min_stop_s, hr_drop_pct) if isinstance(prof, str) and len(prof) > 2 else None
+        if tt is None:
+            continue
+        total_s = float(df.at[i, "time_hr"]) * 3600
+        if not np.isfinite(total_s):
+            continue
+        br = min(tt[0], total_s)
+        df.at[i, "stopped_hr"], df.at[i, "moving_hr"] = br / 3600, (total_s - br) / 3600
+        df.at[i, "slow_technical_hr"] = tt[1] / 3600
+    return df
+
+
+def profile_frame(profile_json: str, min_stop_s: float = DEFAULT_MIN_STOP_S, hr_drop_pct: float = DEFAULT_HR_DROP_PCT) -> pd.DataFrame | None:
+    """Saved profile string -> DataFrame(miles, altitude_ft, heart_rate, stop_min, slow_min), or None.
+    stop_min = minutes of real breaks starting in that slice; slow_min = minutes of slow technical going."""
     if not isinstance(profile_json, str) or not profile_json.strip():
         return None
     try:
         p = json.loads(profile_json)
-        return pd.DataFrame({"miles": p["d"], "altitude_ft": p["a"], "heart_rate": p["h"], "stop_min": p["s"]})
+        df = pd.DataFrame({"miles": p["d"], "altitude_ft": p["a"], "heart_rate": p["h"]})
+        stop, slow = np.zeros(len(df)), np.zeros(len(df))
+        miles = df["miles"].to_numpy(dtype=float)
+        for c in _cands_from_profile(p):
+            if c["secs"] < min_stop_s:
+                continue
+            k = int(np.argmin(np.abs(miles - c["mile"])))
+            (stop if is_break(c, min_stop_s, hr_drop_pct) else slow)[k] += c["secs"] / 60
+        df["stop_min"], df["slow_min"] = stop, slow
+        return df
     except Exception:
         return None

@@ -22,6 +22,12 @@ This project focuses on creating a streamlit app that will ingest your Garmin hi
 
 With fewer than 5 hikes the app falls back to the Naismith rule scaled to your pace and says so on screen.
 
+## How stops are detected
+A *break* is a stretch of 3+ minutes where you covered almost no ground (counting height gained as well as distance, so scrambling
+isn't mistaken for standing still) **and** either the watch timer paused or your heart rate fell at least 8% below its level while
+moving. Slow stretches where heart rate stayed up (ice, rock) are shown as *slow technical* and count as moving. Both numbers can be
+changed in the sidebar under "Stop detection (advanced)"; the raw slow stretches are saved with each hike, so changing them is instant.
+
 ## Default dashboard from your own Garmin (optional, owner only)
 Want the app to open on *your* hikes instead of an empty upload page? Add a Garmin **Personal API** key:
 

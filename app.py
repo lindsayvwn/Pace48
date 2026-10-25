@@ -22,7 +22,8 @@ from garmin_io import HIKE_COLUMNS, NUMERIC, activity_key, combine_saved, load_a
 from tags_io import hikes_from_csv, hikes_to_csv, tags_from_csv, tags_to_csv
 from model import (FEATURES, MIN_HIKES_FOR_MOVING_MODEL, MIN_HIKES_FOR_REGRESSION, TARGET, MovingStopModel, PaceModel,
                    fit_regression, predict, simple_loo_mae)
-from track_features import TRACK_NUMERIC, TRACK_VERSION, profile_frame, profile_version
+from track_features import (DEFAULT_HR_DROP_PCT, DEFAULT_MIN_STOP_S, TRACK_NUMERIC, TRACK_VERSION, apply_stop_rules,
+                            profile_frame, profile_version)
 
 HERE = Path(__file__).parent
 PEAKS = pd.read_csv(HERE / "data" / "nh4000_peaks.csv")
@@ -161,6 +162,14 @@ with st.sidebar:
         help="The file you downloaded from this app last time. It restores your NH 4000 tags and exclusions.",
     )
     use_demo = st.checkbox("No Garmin data? Use synthetic demo data", value=False)
+    with st.expander("Stop detection (advanced)"):
+        stop_min_min = st.slider("Shortest break to count (minutes)", 1, 10, DEFAULT_MIN_STOP_S // 60,
+                                 help="A slow or still stretch shorter than this counts as moving.")
+        hr_drop = st.slider("Heart-rate drop that proves a rest (%)", 0, 25, int(DEFAULT_HR_DROP_PCT),
+                            help="On ice or scrambling your watch can look 'stopped' while you are working hard. A slow stretch only "
+                                 "counts as a break if your heart rate fell by at least this much below where it was while moving "
+                                 "(or the watch timer paused). Slow stretches that don't qualify are shown as 'slow technical' "
+                                 "and counted as moving. 0 = ignore heart rate.")
     c1, c2 = st.columns(2)
     dist_unit = c1.radio("CSV distance", ["mi", "km"], horizontal=True)
     elev_unit = c2.radio("CSV elevation", ["ft", "m"], horizontal=True)
@@ -302,6 +311,7 @@ chosen_types = st.sidebar.multiselect(
          "so mixing types can make predictions too optimistic.",
 )
 all_rows = activities[activities["activity_type"].isin(chosen_types)].reset_index(drop=True)
+all_rows = apply_stop_rules(all_rows, stop_min_min * 60, hr_drop)   # stopped/moving time under the sidebar's stop rules
 all_rows["stopped_pct"] = 100 * all_rows["stopped_hr"] / all_rows["time_hr"].where(all_rows["time_hr"] > 0)
 if all_rows.empty:
     st.error("No activities of the selected types.")
@@ -381,7 +391,7 @@ with tab5:
 # ============================================================ TAB 1
 with tab1:
     # Base table is rebuilt only when the data/tags change, so edits made in the grid aren't reset.
-    editor_key = f"editor-{hash(tuple(all_rows['key']))}-{st.session_state.get('tags_version', 0)}"
+    editor_key = f"editor-{hash(tuple(all_rows['key']))}-{st.session_state.get('tags_version', 0)}-{stop_min_min}-{hr_drop}"
     base_key = f"base-{editor_key}"
     if base_key not in st.session_state:
         st.session_state[base_key] = pd.DataFrame({
@@ -555,7 +565,7 @@ with tab_prof:
         else:
             labels = [f"{r['date']:%b %d, %Y} · {r['title']} · {r['distance_mi']:.1f} mi" for _, r in withp.iterrows()]
             pick = st.selectbox("Hike", range(len(withp)), index=len(withp) - 1, format_func=lambda i: labels[i])
-            pf = profile_frame(withp.loc[pick, "profile"])
+            pf = profile_frame(withp.loc[pick, "profile"], stop_min_min * 60, hr_drop)
             if pf is None:
                 st.warning("Couldn't read this hike's profile.")
             else:
@@ -564,10 +574,18 @@ with tab_prof:
                                          line=dict(color=ACCENT), fillcolor="rgba(46,111,87,0.25)"), secondary_y=False)
                 fig.add_trace(go.Scatter(x=pf["miles"], y=pf["heart_rate"], name="Heart rate (bpm)",
                                          line=dict(color="#C0392B", width=1.5)), secondary_y=True)
-                stops = pf[pf["stop_min"] >= 3]   # every real stop is 3+ minutes
+                stops = pf[pf["stop_min"] > 0]
+                slow = pf[pf["slow_min"] > 0]
+                if len(slow):
+                    fig.add_trace(go.Scatter(
+                        x=slow["miles"], y=slow["altitude_ft"], mode="markers", name=f"Slow technical ({stop_min_min}+ min)",
+                        marker=dict(size=(8 + slow["slow_min"] * 1.2).clip(upper=40), color="#5B7DB1", symbol="diamond",
+                                    line=dict(color="white", width=1)),
+                        text=[f"slow going for about {m:.0f} min (heart rate stayed up, so not counted as a rest)" for m in slow["slow_min"]],
+                        hoverinfo="text+x"), secondary_y=False)
                 if len(stops):
                     fig.add_trace(go.Scatter(
-                        x=stops["miles"], y=stops["altitude_ft"], mode="markers", name="Stops (3+ min)",
+                        x=stops["miles"], y=stops["altitude_ft"], mode="markers", name=f"Stops ({stop_min_min}+ min)",
                         marker=dict(size=(8 + stops["stop_min"] * 1.2).clip(upper=40), color="#E6A100",
                                     line=dict(color="white", width=1)),
                         text=[f"stopped about {m:.0f} min" for m in stops["stop_min"]], hoverinfo="text+x"), secondary_y=False)
@@ -579,11 +597,13 @@ with tab_prof:
                 st.plotly_chart(fig, width="stretch")
                 r = withp.loc[pick]
                 biggest = pf.loc[pf["stop_min"].idxmax()]
+                slow_hr = r.get("slow_technical_hr")
                 st.caption(
                     f"Moving {fmt_hours(r['moving_hr'])}, stopped {fmt_hours(r['stopped_hr'])} "
                     f"({_num(r['stopped_pct'], '%')} of {fmt_hours(r['time_hr'])})"
                     + (f" · biggest stop about {biggest['stop_min']:.0f} min near mile {biggest['miles']:.1f}."
                        if biggest["stop_min"] > 0 else ".")
+                    + (f" Slow technical going (counted as moving): {fmt_delta(slow_hr)}." if pd.notna(slow_hr) and slow_hr > 0 else "")
                 )
 
         if len(trk) >= 2:
@@ -604,8 +624,11 @@ with tab_prof:
                             color_discrete_sequence=[ACCENT])
             f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?")
             c2.plotly_chart(f2, width="stretch")
-        st.caption("A stop is a break of 3+ minutes: covering less than about 0.7 mph over 30 seconds (the watch's own speed "
-                   "reading drops to zero too often to trust), or the watch's timer paused. Shorter slowdowns count as moving. Grade is measured over about 100 m of trail from smoothed barometric "
+        st.caption("A stop is a break: a stretch at or above the shortest-break setting (sidebar, default 3 minutes) where you covered "
+                   "less than about 0.7 mph over 30 seconds (counting height gained as well as ground covered, so scrambling "
+                   "isn't mistaken for standing still; the watch's own speed reading drops to zero too often to trust) AND either the "
+                   "watch's timer paused or your heart rate fell. Slow stretches where it stayed up, like ice or rock, are 'slow technical' "
+                   "time and count as moving. Grade is measured over about 100 m of trail from smoothed barometric "
                    "altitude, so short scrambles are averaged out. Peak predictions use distance and total climb because "
                    "the reference routes don't include steepness data yet.")
 
