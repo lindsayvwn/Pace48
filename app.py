@@ -165,14 +165,16 @@ except ValueError as e:
     st.stop()
 loader.empty()
 if saved_df is not None:
-    n_before = len(saved_df)
+    n_before, n_uploaded = len(saved_df), len(activities)
     activities = combine_saved(saved_df[HIKE_COLUMNS], activities)
-    st.caption(f"Loaded **{n_before} saved hikes**; {len(activities) - n_before} new from this visit's uploads.")
+    n_new = len(activities) - n_before
+    st.caption(f"Loaded **{n_before} saved hikes**; {n_new} new from this visit's uploads"
+               + (f" ({n_uploaded - n_new} already saved, not added again)." if n_uploaded - n_new > 0 else "."))
 for _c in HIKE_COLUMNS:  # belt and braces: never crash on a table that lacks a column
     if _c not in activities.columns:
         activities[_c] = float("nan") if _c in NUMERIC else ""
 for n in notes:
-    st.warning(n)
+    (st.info if n.startswith("ℹ️") else st.warning)(n)
 if activities.empty:
     st.error("I couldn't find any activities in those files.")
     st.stop()
@@ -456,10 +458,10 @@ with tab_prof:
                                          line=dict(color=ACCENT), fillcolor="rgba(46,111,87,0.25)"), secondary_y=False)
                 fig.add_trace(go.Scatter(x=pf["miles"], y=pf["heart_rate"], name="Heart rate (bpm)",
                                          line=dict(color="#C0392B", width=1.5)), secondary_y=True)
-                stops = pf[pf["stop_min"] >= 1]
+                stops = pf[pf["stop_min"] > 0]
                 if len(stops):
                     fig.add_trace(go.Scatter(
-                        x=stops["miles"], y=stops["altitude_ft"], mode="markers", name="Stops (≥1 min)",
+                        x=stops["miles"], y=stops["altitude_ft"], mode="markers", name="Stops (3+ min)",
                         marker=dict(size=(8 + stops["stop_min"] * 1.2).clip(upper=40), color="#E6A100",
                                     line=dict(color="white", width=1)),
                         text=[f"stopped about {m:.0f} min" for m in stops["stop_min"]], hoverinfo="text+x"), secondary_y=False)
@@ -475,7 +477,7 @@ with tab_prof:
                     f"Moving {fmt_hours(r['moving_hr'])}, stopped {fmt_hours(r['stopped_hr'])} "
                     f"({_num(r['stopped_pct'], '%')} of {fmt_hours(r['time_hr'])})"
                     + (f" · biggest stop about {biggest['stop_min']:.0f} min near mile {biggest['miles']:.1f}."
-                       if biggest["stop_min"] >= 1 else ".")
+                       if biggest["stop_min"] > 0 else ".")
                 )
 
         if len(trk) >= 2:
@@ -496,8 +498,8 @@ with tab_prof:
                             color_discrete_sequence=[ACCENT])
             f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?")
             c2.plotly_chart(f2, width="stretch")
-        st.caption("Moving = covering at least about 0.7 mph, measured over 30 seconds of distance (the watch's own speed "
-                   "reading drops to zero too often to trust). Time with the watch's timer paused counts as stopped. Grade is measured over about 100 m of trail from smoothed barometric "
+        st.caption("A stop is a break of 3+ minutes: covering less than about 0.7 mph over 30 seconds (the watch's own speed "
+                   "reading drops to zero too often to trust), or the watch's timer paused. Shorter slowdowns count as moving. Grade is measured over about 100 m of trail from smoothed barometric "
                    "altitude, so short scrambles are averaged out. Peak predictions use distance and total climb because "
                    "the reference routes don't include steepness data yet.")
 

@@ -18,6 +18,8 @@ FT_PER_M = 3.28084
 MOVING_MPS = 0.3          # covering less than this (about 0.7 mph) over WINDOW_S counts as stopped
 WINDOW_S = 30             # distance covered in a 30 s window centred on each record
 MAX_STEP_S = 5            # a gap between records longer than this is a pause (timer stopped), not movement
+MIN_STOP_S = 180          # a "stop" is a break of at least 3 minutes; shorter slowdowns count as part of moving
+MERGE_GAP_S = 30          # a rest interrupted by under 30 s of movement (GPS wobble) is still one stop
 SMOOTH_SAMPLES = 15       # altitude smoothing (barometric altitude is noisy second to second)
 GRADE_HALF_WINDOW_M = 50  # grade is measured over ~100 m of trail
 MODERATE, STEEP = 5.0, 15.0   # grade thresholds, percent
@@ -78,9 +80,14 @@ def extract(ts, dist_m, alt_m, hr, elapsed_s: float) -> dict:
     def tot(mask, arr):
         return float(np.sum(arr[mask & moving]))
 
-    moving_s = float(np.sum(dt[moving]))
-    out["moving_hr"] = moving_s / 3600
-    out["stopped_hr"] = max(float(elapsed_s) - moving_s, 0.0) / 3600 if elapsed_s else _NAN
+    stops = find_stops(secs, moving, dt_raw)
+    stopped_s = sum(d for _, _, d in stops)
+    if elapsed_s:
+        stopped_s = min(stopped_s, float(elapsed_s))
+        out["stopped_hr"] = stopped_s / 3600
+        out["moving_hr"] = (float(elapsed_s) - stopped_s) / 3600   # everything that isn't a 3+ minute stop
+    else:
+        out["moving_hr"] = float(np.sum(dt[moving])) / 3600
 
     flat_mi = tot(bins["flat"], ddist) / M_PER_MILE
     if flat_mi >= MIN_FLAT_MI:
@@ -102,12 +109,33 @@ def extract(ts, dist_m, alt_m, hr, elapsed_s: float) -> dict:
     if all_up_m > 0:
         out["steep_ascent_pct"] = 100 * tot(bins["steep_up"], np.clip(dalt, 0, None)) / all_up_m
 
-    out["profile"] = _profile(df, dist, alt, dt_raw, moving)
+    out["profile"] = _profile(df, dist, alt, stops)
     return out
 
 
-def _profile(df, dist, alt, dt_raw, moving) -> str:
-    """~80 evenly spaced points along the route: miles, altitude (ft), heart rate (bpm), minutes stopped there."""
+def find_stops(secs, moving, dt_raw) -> list[tuple[int, int, float]]:
+    """Breaks of at least MIN_STOP_S: [(first_record, last_record, seconds)]. Paused-timer gaps count as stopped time."""
+    runs, i, n = [], 0, len(secs)
+    while i < n:
+        if moving[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and not moving[j + 1]:
+            j += 1
+        runs.append([i, j, secs[i] - dt_raw[i], secs[j]])   # [first, last, start_s, end_s]
+        i = j + 1
+    merged = []
+    for r in runs:
+        if merged and r[2] - merged[-1][3] <= MERGE_GAP_S:
+            merged[-1][1], merged[-1][3] = r[1], r[3]
+        else:
+            merged.append(r)
+    return [(a, b, e - s) for a, b, s, e in merged if e - s >= MIN_STOP_S]
+
+
+def _profile(df, dist, alt, stops) -> str:
+    """~80 evenly spaced points along the route: miles, altitude (ft), heart rate (bpm), minutes of 3+ minute stops there."""
     total = dist[-1]
     edges = np.linspace(0, total, PROFILE_POINTS + 1)
     centers = (edges[:-1] + edges[1:]) / 2
@@ -120,8 +148,10 @@ def _profile(df, dist, alt, dt_raw, moving) -> str:
         hr_c = np.interp(centers, gh["d"], gh["h"])
     else:
         hr_c = np.full(PROFILE_POINTS, np.nan)
-    idx = np.clip(np.digitize(dist, edges) - 1, 0, PROFILE_POINTS - 1)
-    stop_min = np.bincount(idx, weights=np.where(moving, 0.0, dt_raw), minlength=PROFILE_POINTS) / 60
+    stop_min = np.zeros(PROFILE_POINTS)
+    for first, _last, secs_stopped in stops:   # each stop is credited, whole, to where it began
+        k = int(np.clip(np.digitize(dist[first], edges) - 1, 0, PROFILE_POINTS - 1))
+        stop_min[k] += secs_stopped / 60
     rnd = lambda arr, n: [None if not np.isfinite(x) else round(float(x), n) for x in arr]  # noqa: E731
     return json.dumps({"d": rnd(centers / M_PER_MILE, 2), "a": rnd(alt_c, 0), "h": rnd(hr_c, 0), "s": rnd(stop_min, 1)},
                       separators=(",", ":"))

@@ -217,6 +217,10 @@ def read_fit_uploads(files: list[tuple[str, bytes]]) -> tuple[pd.DataFrame, list
     if not rows:
         return pd.DataFrame(columns=HIKE_COLUMNS), notes
     df = pd.DataFrame(rows)[HIKE_COLUMNS].drop_duplicates(subset=["start_local", "distance_mi"])
+    if len(df) < len(rows):  # the same activity uploaded more than once (same start time and distance)
+        k = len(rows) - len(df)
+        notes.append(f"ℹ️ Ignored {k} duplicate file{'s' if k != 1 else ''}: the same hike was uploaded more than once. "
+                     "Hikes on different days are all kept.")
     return df, notes
 
 
