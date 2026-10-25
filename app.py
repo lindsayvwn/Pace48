@@ -658,7 +658,7 @@ with tab_prof:
 
 # ============================================================ TAB 3
 with tab3:
-    st.subheader("Fit a linear regression: two inputs → one target")
+    st.subheader("Fit a linear regression")
     if len(model_df) < 3:
         st.warning("Need at least 3 activities with complete numbers to fit a model.")
     else:
@@ -690,7 +690,7 @@ with tab3:
                 f"**{LABELS[target]}** ≈ {fit['model'].intercept_:.2f} + {coefs[0]:.4g} × {LABELS[in1]} "
                 f"+ {coefs[1]:.4g} × {LABELS[in2]}"
             )
-            st.markdown("**Try it — type in values:**")
+            st.markdown("#### Test predictions")
             d1, d2 = st.columns(2)
             v1 = d1.number_input(LABELS[in1], value=float(round(model_df[in1].median(), 1)), min_value=0.0, key=f"v1-{in1}")
             v2 = d2.number_input(LABELS[in2], value=float(round(model_df[in2].median(), 1)), min_value=0.0, key=f"v2-{in2}")
@@ -699,15 +699,47 @@ with tab3:
                 st.success(f"Predicted **{LABELS[target].replace(' (hr)', '')}: {fmt_hours(pred)}**")
             else:
                 st.success(f"Predicted **{LABELS[target]}: {pred:.2f}**")
-            tmp = model_df[feats + [target]].dropna().copy()
+            tmp = model_df[["title", "date"] + feats + [target]].dropna(subset=feats + [target]).copy()
             tmp["predicted"] = fit["model"].predict(tmp[feats])
-            f2 = px.scatter(tmp, x="predicted", y=target, labels={"predicted": f"Predicted {LABELS[target]}", target: f"Actual {LABELS[target]}"},
-                            color_discrete_sequence=[ACCENT])
+            if is_time:   # show hours as h:mm (4.5 -> 4:30) on the axes and in the hover
+                hm = lambda h: f"{int(round(h * 60)) // 60}:{int(round(h * 60)) % 60:02d}"   # noqa: E731
+                tmp["pred_txt"], tmp["act_txt"] = tmp["predicted"].map(hm), tmp[target].map(hm)
+            else:
+                tmp["pred_txt"], tmp["act_txt"] = tmp["predicted"].map("{:.2f}".format), tmp[target].map("{:.2f}".format)
+            tmp["when"] = pd.to_datetime(tmp["date"], errors="coerce").dt.strftime("%b %d, %Y").fillna("")
+            ylab = LABELS[target].replace(" (hr)", "") if is_time else LABELS[target]
+            f2 = go.Figure()
             lo, hi = float(tmp[[target, "predicted"]].min().min()), float(tmp[[target, "predicted"]].max().max())
-            f2.add_shape(type="line", x0=lo, y0=lo, x1=hi, y1=hi, line=dict(dash="dot", color="gray"))
-            f2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=360)
+            pad = (hi - lo) * 0.05 or 0.5
+            f2.add_trace(go.Scatter(x=[lo - pad, hi + pad], y=[lo - pad, hi + pad], mode="lines", hoverinfo="skip", showlegend=False,
+                                    line=dict(dash="dot", color="gray")))
+            f2.add_trace(go.Scatter(
+                x=tmp["predicted"], y=tmp[target], mode="markers", showlegend=False,
+                marker=dict(size=13, color=ACCENT, line=dict(color="white", width=1)),
+                customdata=np.stack([tmp["title"].astype(str), tmp["when"], tmp["pred_txt"], tmp["act_txt"]], axis=-1),
+                hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]}<br>Predicted: %{customdata[2]}<br>"
+                              "Actual: %{customdata[3]}<extra></extra>"))
+            axis = dict(title_font=dict(size=18), tickfont=dict(size=14), showgrid=False, zeroline=False)
+            xax, yax = dict(axis), dict(axis)
+            if is_time:   # whole-hour ticks labelled 4:00, 5:00 ...
+                step = 1 if (hi - lo) <= 10 else 2
+                ticks = list(np.arange(np.floor(lo - pad), np.ceil(hi + pad) + 1, step))
+                for ax in (xax, yax):
+                    ax.update(tickmode="array", tickvals=ticks, ticktext=[f"{int(t)}:00" for t in ticks])
+            xax["title_text"] = f"Predicted {ylab}"
+            yax["title_text"] = f"Actual {ylab}"
+            f2.update_xaxes(**xax)
+            f2.update_yaxes(**yax)
+            f2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=380, hoverlabel=dict(font_size=14))
             st.plotly_chart(f2, width="stretch")
-            st.caption("Dots on the dotted line = perfect predictions.")
+            st.caption("Dots on the dotted line = perfect predictions. Hover a dot to see which hike it is.")
+            st.caption(
+                f"**Limitations:** this model is fit on {fit['n']} activit{'y' if fit['n'] == 1 else 'ies'}, a small sample, so a single unusual day "
+                "(an icy hike, a long summit rest, a slow group) can shift it noticeably, and the error figures above are rough. "
+                "It only sees distance and climb, not weather, trail roughness or how tired you were, and it is least reliable for "
+                "trips longer or steeper than anything you've logged. More activities, ideally with a mix of lengths and "
+                "climbs, will make the predictions steadier and better."
+            )
 
 # ============================================================ TAB 4
 with tab4:
