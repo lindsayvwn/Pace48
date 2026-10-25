@@ -45,8 +45,7 @@ GPS-based tags replace title-based guesses (and older saved tags) unless you edi
 
 **From the title (fallback, for files without GPS).** Titles are matched to the 48 peaks automatically, forgiving of "Mt."/"Mount" and small spelling slips ("Waumbeck"). Shorthand such as
 "Wildcat A", "Tripyramid" or "Franconia Ridge" lives in `data/peak_aliases.csv` (columns `alias,peaks`; separate several peaks with `|`):
-add your own lines there. Trail names that contain a peak's name but aren't the peak ("Lincoln Woods", "Lincoln Brook", "Zealand Falls") are listed in `data/peak_exclusions.csv` (`phrase,peak`) and ignored when tagging. To keep your edited tags for the default (owner) hikes across sessions and refreshes, use *Save tags only*
-in the app and commit that file as `data/owner_tags.csv`.
+add your own lines there. Trail names that contain a peak's name but aren't the peak ("Lincoln Woods", "Lincoln Brook", "Zealand Falls") are listed in `data/peak_exclusions.csv` (`phrase,peak`) and ignored when tagging.
 
 ## Default dashboard from your own Garmin (optional, owner only)
 Want the app to open on *your* hikes instead of an empty upload page? Add a Garmin **Personal API** key:

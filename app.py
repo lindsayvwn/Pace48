@@ -20,7 +20,7 @@ import streamlit as st
 
 import garmin_personal as gp
 from garmin_io import HIKE_COLUMNS, NUMERIC, activity_key, combine_saved, load_activities
-from tags_io import hikes_from_csv, hikes_to_csv, tags_from_csv, tags_to_csv
+from tags_io import hikes_from_csv, hikes_to_csv
 from model import (FEATURES, MIN_HIKES_FOR_MOVING_MODEL, MIN_HIKES_FOR_REGRESSION, TARGET, MovingStopModel, PaceModel,
                    fit_regression, predict, simple_loo_mae)
 from track_features import (DEFAULT_HR_DROP_SD, DEFAULT_MIN_STOP_S, TRACK_NUMERIC, TRACK_VERSION, apply_stop_rules,
@@ -133,7 +133,6 @@ LOADER_HTML = """
 
 
 ALIASES_CSV = HERE / "data" / "peak_aliases.csv"
-OWNER_TAGS_CSV = HERE / "data" / "owner_tags.csv"
 EXCLUSIONS_CSV = HERE / "data" / "peak_exclusions.csv"
 _FILLER = {"mt", "mount", "mountain", "mtn"}
 FUZZY_MIN_LEN, FUZZY_RATIO = 6, 0.86
@@ -211,15 +210,6 @@ def suggest_peaks(title: str) -> list[str]:
         if _phrase_in(words, alias_words):
             found += [p for p in peaks if p not in found]
     return found
-
-
-@st.cache_data(show_spinner=False)
-def _owner_tag_defaults() -> dict:
-    """data/owner_tags.csv (optional): the owner's saved tags-only file, so their peak tags survive new sessions and refreshes."""
-    try:
-        return tags_from_csv(OWNER_TAGS_CSV.read_bytes())
-    except Exception:
-        return {}
 
 
 # ------------------------------------------------------- owner's default data (Garmin Personal API)
@@ -326,10 +316,6 @@ with st.sidebar:
         "② Activity .zip / .fit files (recommended)", type=["zip", "fit"], accept_multiple_files=True,
         help="Garmin's CSV often leaves climb blank. The .fit files carry the real distance, climb and time, "
              "and are matched to the CSV by start time.",
-    )
-    tags_up = st.file_uploader(
-        "③ Older tags-only file (optional)", type=["csv"],
-        help="The file you downloaded from this app last time. It restores your NH 4000 tags and exclusions.",
     )
     use_demo = st.checkbox("No Garmin data? Use synthetic demo data", value=False)
     c1, c2 = st.columns(2)
@@ -508,21 +494,7 @@ if saved_df is not None:
             }
         st.session_state["saved_sig"] = sig
         st.session_state["tags_version"] = st.session_state.get("tags_version", 0) + 1
-if tags_up is not None:
-    sig = (tags_up.name, tags_up.size)
-    if st.session_state.get("tags_sig") != sig:  # apply each saved file once, not on every rerun
-        try:
-            tags.update(tags_from_csv(tags_up.getvalue()))
-            st.session_state["tags_sig"] = sig
-            st.session_state["tags_version"] = st.session_state.get("tags_version", 0) + 1
-        except Exception as e:
-            st.sidebar.error(f"Couldn't read the saved tags file: {e}")
-            st.session_state["tags_sig"] = sig
-
 all_rows["key"] = [activity_key(a, d, m) for a, d, m in zip(all_rows["start_local"], all_rows["date"], all_rows["distance_mi"])]
-if owner_df is not None:   # the owner's committed tags (data/owner_tags.csv) are the starting point for their hikes
-    for _k, _v in _owner_tag_defaults().items():
-        tags.setdefault(_k, dict(_v))
 for _, r in all_rows.iterrows():
     entry = tags.setdefault(r["key"], {"peaks": [], "include": True, "auto": True})
     gps_peaks = peaks_from_profile(r["profile"]) if isinstance(r["profile"], str) else None
@@ -659,10 +631,6 @@ with tab1:
         data=hikes_to_csv(activities, tags, activity_key), file_name="my_pace48_hikes.csv", mime="text/csv",
         help="One condensed file with your hike numbers, peak tags and exclusions. Next visit, upload it in the "
              "sidebar (step ⓪) plus only your NEW hikes, and everything comes back. No GPS data is included.",
-    )
-    st.download_button(
-        "Save tags only (older format)", data=tags_to_csv(tags), file_name="my_nh4000_tags.csv", mime="text/csv",
-        help="Tags and exclusions only, without hike numbers. Prefer the hikes file above.",
     )
     st.caption("Tip: this app can't remember you between visits, so download your hikes file when you're done.")
 
