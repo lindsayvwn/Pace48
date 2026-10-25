@@ -1,4 +1,4 @@
-"""NH 4000-Footer Pace Predictor — a Streamlit app.
+"""NH48 Pace Predictor — a Streamlit app.
 
 Upload your own Garmin hikes -> tag the ones that were NH 4000-footers ->
 the app learns YOUR pace and predicts how long any of the 48 peaks will take you.
@@ -22,7 +22,7 @@ PEAKS = pd.read_csv(HERE / "data" / "nh4000_peaks.csv")
 DEMO_CSV = HERE / "data" / "demo_activities_SYNTHETIC.csv"
 ACCENT = "#2E6F57"
 
-st.set_page_config(page_title="NH48 Pace Predictor", page_icon="🏔️", layout="wide")
+st.set_page_config(page_title="NH48 Pace", page_icon="🏔️", layout="wide")
 
 LABELS = {
     "distance_mi": "Distance (mi)", "ascent_ft": "Elevation gain (ft)", "descent_ft": "Elevation loss (ft)",
@@ -173,7 +173,7 @@ if fit_files:
         + (f" · {counts.get('fit only', 0)} .fit file(s) with no CSV row (named by filename)" if counts.get("fit only", 0) else "")
         + (f" · {counts.get('csv only', 0)} CSV rows with no .fit file (climb may be missing)" if counts.get("csv only", 0) else "")
     )
-else:
+elif saved_df is None:
     st.warning("No .fit/.zip files uploaded: using the CSV's own numbers, and Garmin often leaves climb blank there. "
                "Upload the .zip files for best results.")
 
@@ -263,7 +263,8 @@ with tab1:
     if base_key not in st.session_state:
         st.session_state[base_key] = pd.DataFrame({
             "include": [tags[k]["include"] for k in all_rows["key"]],
-            "date": all_rows["date"], "title": all_rows["title"], "activity_type": all_rows["activity_type"],
+            "date": all_rows["date"], "title": all_rows["title"], "source_file": all_rows["source_file"],
+            "match": all_rows["match"], "activity_type": all_rows["activity_type"],
             "distance_mi": all_rows["distance_mi"], "ascent_ft": all_rows["ascent_ft"],
             "time_hr": all_rows["time_hr"], "avg_hr": all_rows["avg_hr"],
             "nh4000": [tags[k]["peaks"] for k in all_rows["key"]],
@@ -275,11 +276,15 @@ with tab1:
     edited = st.data_editor(
         st.session_state[base_key],
         key=editor_key, hide_index=True, width="stretch",
-        disabled=["date", "title", "activity_type", "distance_mi", "ascent_ft", "time_hr", "avg_hr"],
+        disabled=["date", "title", "source_file", "match", "activity_type", "distance_mi", "ascent_ft", "time_hr", "avg_hr"],
         column_config={
             "include": st.column_config.CheckboxColumn("Use", default=True),
             "date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
             "title": "Title", "activity_type": "Type",
+            "source_file": st.column_config.TextColumn("Source file", width="medium", help="The .zip/.fit you uploaded that this hike's "
+                "numbers came from. Blank = only in Activities.csv (no file matched)."),
+            "match": st.column_config.TextColumn("Match", help="matched = CSV row + .fit file; csv only; fit only (no CSV "
+                "row, so named by its filename); saved = restored from your saved hikes file."),
             "distance_mi": st.column_config.NumberColumn("Miles", format="%.1f"),
             "ascent_ft": st.column_config.NumberColumn("Climb (ft)", format="%.0f"),
             "time_hr": st.column_config.NumberColumn("Hours", format="%.2f"),
@@ -303,7 +308,7 @@ with tab1:
     # Which used activities have real data, and which still need a matching .fit/.zip?
     def _summary(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame({
-            "Date": df["date"], "Activity": df["title"],
+            "Date": df["date"], "Activity": df["title"], "Source file": df["source_file"],
             "NH 4000 peaks": df["peaks"].map(lambda ps: ", ".join(ps)),
             "Miles": df["distance_mi"],
         })

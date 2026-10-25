@@ -17,7 +17,7 @@ FT_PER_M = 3.28084
 
 # Same columns, same order, every time (also the order used for model training).
 HIKE_COLUMNS = [
-    "start_local", "date", "title", "match", "activity_type",
+    "start_local", "date", "title", "match", "source_file", "activity_type",
     "distance_mi", "ascent_ft", "descent_ft", "time_hr",
     "avg_hr", "max_hr", "calories",
 ]
@@ -69,6 +69,7 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
         "date": start_local.normalize() if pd.notna(start_local) else pd.NaT,
         "title": name,
         "match": "fit only",
+        "source_file": name,  # the file this hike came from (zip name is swapped in by read_fit_uploads)
         "activity_type": sport or "unknown",
         "distance_mi": session["total_distance"] / M_PER_MILE,
         "ascent_ft": (session["total_ascent"] or 0) * FT_PER_M,
@@ -140,6 +141,7 @@ def parse_activities_csv(data: bytes, distance_unit: str = "mi", elevation_unit:
         "date": start_local.dt.normalize(),
         "title": pick("title").fillna("").astype(str),
         "match": "csv only",
+        "source_file": "",
         "activity_type": pick("activity_type").fillna("unknown").astype(str),
         "distance_mi": dist,
         "ascent_ft": asc,
@@ -183,7 +185,13 @@ def read_fit_uploads(files: list[tuple[str, bytes]]) -> tuple[pd.DataFrame, list
                 row = parse_fit(data, fname)
                 rows.append(row) if row else notes.append(f"{fname}: no activity summary found.")
             elif low.endswith(".zip"):
+                before = len(rows)
                 _walk_zip(data, rows, notes)
+                added = len(rows) - before
+                for r in rows[before:]:
+                    # a single-hike zip (Garmin "Export Original", e.g. 19909908649.zip) is named by the zip itself;
+                    # a big multi-hike zip is named "bigzip.zip › member.fit" so you can still find the hike
+                    r["source_file"] = fname if added == 1 else f"{fname} › {r['source_file']}"
             else:
                 notes.append(f"{fname}: unsupported file type.")
         except Exception as e:  # keep the app alive on a bad file
@@ -234,8 +242,9 @@ def merge_sources(csv_df: pd.DataFrame, fit_df: pd.DataFrame) -> pd.DataFrame:
                     row[col] = c[col]
         rows.append(row)
     leftovers = csv_df[~csv_df.index.isin(used)]
-    out = pd.concat([pd.DataFrame(rows), leftovers], ignore_index=True)[HIKE_COLUMNS]
-    return out.sort_values("start_local").reset_index(drop=True)
+    out = pd.concat([pd.DataFrame(rows), leftovers], ignore_index=True)
+    out["source_file"] = out["source_file"].fillna("")
+    return out[HIKE_COLUMNS].sort_values("start_local").reset_index(drop=True)
 
 
 def load_activities(csv_bytes: bytes, fit_files: list[tuple[str, bytes]], distance_unit="mi", elevation_unit="ft"):
@@ -294,6 +303,8 @@ def combine_saved(prior: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
                 merged[c] = old[c]
             if str(old.get("title", "")).strip() and merged.get("match") in ("fit only", None):
                 merged["title"] = old["title"]
+            if not str(merged.get("source_file") or "").strip():
+                merged["source_file"] = old.get("source_file", "")
             rows[i] = merged
     out = pd.DataFrame(rows)
     for c in extra:

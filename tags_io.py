@@ -40,7 +40,7 @@ def tags_from_csv(data: bytes) -> dict:
 # One condensed CSV holding every activity's summary numbers PLUS the user's tags and include/exclude choices.
 # Upload it next visit together with only the NEW files. No GPS, name or weight, same as the rest of the app.
 HIKE_FILE_COLUMNS = [
-    "start_local", "date", "title", "activity_type", "distance_mi", "ascent_ft", "descent_ft",
+    "start_local", "date", "title", "source_file", "activity_type", "distance_mi", "ascent_ft", "descent_ft",
     "time_hr", "avg_hr", "max_hr", "calories", "nh4000_peaks", "include",
 ]
 _NUM = ["distance_mi", "ascent_ft", "descent_ft", "time_hr", "avg_hr", "max_hr", "calories"]
@@ -67,7 +67,7 @@ def hikes_from_csv(data: bytes) -> pd.DataFrame:
     out = pd.DataFrame({
         "start_local": pd.to_datetime(df["start_local"], errors="coerce"),
         "date": pd.to_datetime(df["date"], errors="coerce"),
-        "title": df["title"], "match": "saved", "activity_type": df["activity_type"].replace("", "unknown"),
+        "title": df["title"], "match": "saved", "source_file": df["source_file"], "activity_type": df["activity_type"].replace("", "unknown"),
     })
     for c in _NUM:
         out[c] = pd.to_numeric(df[c], errors="coerce")
