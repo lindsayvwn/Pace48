@@ -37,7 +37,7 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
 
     session = None
     local_ts = None
-    rec: dict[str, list] = {"t": [], "d": [], "a": [], "v": [], "h": []}  # time, distance, altitude, speed, heart rate
+    rec: dict[str, list] = {"t": [], "d": [], "a": [], "h": []}  # time, distance, altitude, heart rate
     try:
         with fitdecode.FitReader(io.BytesIO(data)) as reader:
             for frame in reader:
@@ -52,7 +52,6 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
                     rec["t"].append(frame.get_value("timestamp", fallback=None))
                     rec["d"].append(frame.get_value("distance", fallback=None))
                     rec["a"].append(frame.get_value("enhanced_altitude", fallback=frame.get_value("altitude", fallback=None)))
-                    rec["v"].append(frame.get_value("enhanced_speed", fallback=frame.get_value("speed", fallback=None)))
                     rec["h"].append(frame.get_value("heart_rate", fallback=None))
                 elif frame.name == "activity" and local_ts is None:
                     local_ts = frame.get_value("local_timestamp", fallback=None)
@@ -66,7 +65,7 @@ def parse_fit(data: bytes, name: str = "activity.fit") -> dict | None:
     if secs is None:
         return None
     try:
-        track = extract(rec["t"], rec["d"], rec["a"], rec["v"], rec["h"], secs)
+        track = extract(rec["t"], rec["d"], rec["a"], rec["h"], secs)
     except Exception:  # a odd track must never stop the hike from loading
         track = empty_features()
     start = session["start_time"]

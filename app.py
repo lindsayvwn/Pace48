@@ -456,10 +456,10 @@ with tab_prof:
                                          line=dict(color=ACCENT), fillcolor="rgba(46,111,87,0.25)"), secondary_y=False)
                 fig.add_trace(go.Scatter(x=pf["miles"], y=pf["heart_rate"], name="Heart rate (bpm)",
                                          line=dict(color="#C0392B", width=1.5)), secondary_y=True)
-                stops = pf[pf["stop_min"] >= 2]
+                stops = pf[pf["stop_min"] >= 1]
                 if len(stops):
                     fig.add_trace(go.Scatter(
-                        x=stops["miles"], y=stops["altitude_ft"], mode="markers", name="Stops (≥2 min)",
+                        x=stops["miles"], y=stops["altitude_ft"], mode="markers", name="Stops (≥1 min)",
                         marker=dict(size=(8 + stops["stop_min"] * 1.2).clip(upper=40), color="#E6A100",
                                     line=dict(color="white", width=1)),
                         text=[f"stopped about {m:.0f} min" for m in stops["stop_min"]], hoverinfo="text+x"), secondary_y=False)
@@ -475,7 +475,7 @@ with tab_prof:
                     f"Moving {fmt_hours(r['moving_hr'])}, stopped {fmt_hours(r['stopped_hr'])} "
                     f"({_num(r['stopped_pct'], '%')} of {fmt_hours(r['time_hr'])})"
                     + (f" · biggest stop about {biggest['stop_min']:.0f} min near mile {biggest['miles']:.1f}."
-                       if biggest["stop_min"] >= 2 else ".")
+                       if biggest["stop_min"] >= 1 else ".")
                 )
 
         if len(trk) >= 2:
@@ -496,7 +496,8 @@ with tab_prof:
                             color_discrete_sequence=[ACCENT])
             f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?")
             c2.plotly_chart(f2, width="stretch")
-        st.caption("Moving = speed above about 0.7 mph. Grade is measured over about 100 m of trail from smoothed barometric "
+        st.caption("Moving = covering at least about 0.7 mph, measured over 30 seconds of distance (the watch's own speed "
+                   "reading drops to zero too often to trust). Time with the watch's timer paused counts as stopped. Grade is measured over about 100 m of trail from smoothed barometric "
                    "altitude, so short scrambles are averaged out. Peak predictions use distance and total climb because "
                    "the reference routes don't include steepness data yet.")
 

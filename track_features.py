@@ -1,6 +1,6 @@
 """Turn one hike's second-by-second records into a few pace features and a small elevation/heart-rate profile.
 
-Privacy: this module only ever receives time, distance, altitude, speed and heart rate. GPS coordinates are never
+Privacy: this module only ever receives time, distance, altitude and heart rate. GPS coordinates are never
 passed in, and nothing here stores a track: the profile is ~80 points of (distance, altitude, heart rate, stop minutes).
 """
 from __future__ import annotations
@@ -13,8 +13,11 @@ import pandas as pd
 M_PER_MILE = 1609.344
 FT_PER_M = 3.28084
 
-MOVING_MPS = 0.3          # below this speed you're counted as stopped (about 0.7 mph)
-MAX_STEP_S = 5            # a gap between records longer than this is a pause, not movement
+# "Stopped" is judged from how far you actually travelled, NOT from the watch's speed field: that field reads exactly 0
+# for stretches of a hike while distance keeps advancing, which made a hike look 37% stopped when it was ~13%.
+MOVING_MPS = 0.3          # covering less than this (about 0.7 mph) over WINDOW_S counts as stopped
+WINDOW_S = 30             # distance covered in a 30 s window centred on each record
+MAX_STEP_S = 5            # a gap between records longer than this is a pause (timer stopped), not movement
 SMOOTH_SAMPLES = 15       # altitude smoothing (barometric altitude is noisy second to second)
 GRADE_HALF_WINDOW_M = 50  # grade is measured over ~100 m of trail
 MODERATE, STEEP = 5.0, 15.0   # grade thresholds, percent
@@ -34,23 +37,24 @@ def empty_features() -> dict:
     return {**{k: _NAN for k in TRACK_NUMERIC}, "profile": ""}
 
 
-def extract(ts, dist_m, alt_m, speed_mps, hr, elapsed_s: float) -> dict:
-    """ts: datetimes/seconds; the rest are equal-length sequences (None/NaN allowed). Returns a dict of features."""
+def extract(ts, dist_m, alt_m, hr, elapsed_s: float) -> dict:
+    """ts: datetimes; the rest are equal-length sequences (None/NaN allowed). Returns a dict of features."""
     out = empty_features()
-    df = pd.DataFrame({"t": ts, "d": dist_m, "a": alt_m, "v": speed_mps, "h": hr})
+    df = pd.DataFrame({"t": ts, "d": dist_m, "a": alt_m, "h": hr})
     df["t"] = pd.to_datetime(df["t"], utc=True, errors="coerce")
-    for c in ("d", "a", "v", "h"):
+    for c in ("d", "a", "h"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["t", "d", "a"]).reset_index(drop=True)
+    df = df.dropna(subset=["t", "d", "a"]).drop_duplicates(subset="t").sort_values("t").reset_index(drop=True)
     if len(df) < 60 or df["d"].max() < 200:
         return out
 
     dt_raw = df["t"].diff().dt.total_seconds().fillna(0).clip(lower=0).to_numpy()
     dt = np.minimum(dt_raw, MAX_STEP_S)
-    v = df["v"].fillna(0).to_numpy()
-    moving = (v >= MOVING_MPS) & (dt_raw <= MAX_STEP_S)
-
     dist = np.maximum.accumulate(df["d"].to_numpy())
+    secs = (df["t"] - df["t"].iloc[0]).dt.total_seconds().to_numpy()
+    travelled = np.interp(secs + WINDOW_S / 2, secs, dist) - np.interp(secs - WINDOW_S / 2, secs, dist)
+    moving = (travelled / WINDOW_S >= MOVING_MPS) & (dt_raw <= MAX_STEP_S)
+
     alt = df["a"].rolling(SMOOTH_SAMPLES, center=True, min_periods=1).mean().to_numpy()
 
     # grade at each record: altitude change over +/-50 m of distance
