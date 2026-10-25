@@ -481,24 +481,10 @@ tab1, tab2, tab3, tab4, tab_prof, tab5 = st.tabs(
     ["① Preview, tag & exclude", "② Explore", "③ Build a model", "④ Predict an NH 4000-footer",
      "Your pace profile", "Limitations & roadmap"]
 )
-with tab_prof:
-    st.subheader("Your pace profile")
-    with st.expander("Stop detection (advanced)"):
-        stop_min_min = st.slider("Shortest break to count (minutes)", 1, 10, DEFAULT_MIN_STOP_S // 60, key="stop_min_min",
-                                 help="A slow or still stretch shorter than this counts as moving. Changing it re-computes stopped time "
-                                      "for every hike, in every tab.")
-        hr_drop = st.slider("Heart-rate drop that proves a rest (standard deviations)", 0.0, 6.0, float(DEFAULT_HR_DROP_SD), 0.25,
-                            key="hr_drop",
-                            help="Each hike is judged against itself: the app measures how much YOUR heart rate normally varies "
-                                 "while you move on that hike (one standard deviation, often 10-15 bpm). A slow stretch only counts as a "
-                                 "break if your heart rate fell at least this many standard deviations below where it was while moving, "
-                                 "or the watch timer paused, or you stood inside a tight 5 m circle for a minute or more (see below). "
-                                 "Other slow stretches are shown as 'slow technical' and counted as moving. Higher = fewer breaks. "
-                                 "0 = ignore heart rate.")
-        st.caption("How slow is measured: your speed over a **1 minute** moving window. If you are slow on the ground but climbing or "
-                   "dropping quickly (about 950 ft/hr or more), that is effort, not a pause. If your GPS points sit inside a tight "
-                   "**5 m circle** (DBSCAN clustering) for a minute or more, that is a stationary rest break. GPS is used only in memory "
-                   "while a file is read to find those clusters; no coordinate is saved, shown or sent anywhere.")
+# The stop-detection controls sit right under the chart's radio buttons (further down). Their values are read from session state here, so
+# every table and tab can use them before those widgets are drawn (Streamlit stores a widget's value by its key at the start of each run).
+stop_min_min = int(st.session_state.get("stop_min_min", DEFAULT_MIN_STOP_S // 60))
+hr_drop = float(st.session_state.get("hr_drop", DEFAULT_HR_DROP_SD))
 all_rows = apply_stop_rules(all_rows, stop_min_min * 60, hr_drop)   # stopped/moving time under the pace-profile tab's stop rules
 all_rows["stopped_pct"] = 100 * all_rows["stopped_hr"] / all_rows["time_hr"].where(all_rows["time_hr"] > 0)
 if all_rows.empty:
@@ -753,6 +739,7 @@ def _num(v, unit="", dec=0):
 
 
 with tab_prof:
+    st.subheader("Your pace profile")
     trk = hikes.dropna(subset=["moving_hr"]).reset_index(drop=True)
     if trk.empty:
         st.info("This tab needs the .zip/.fit files for your hikes, not just Activities.csv. They carry the second-by-second "
@@ -799,6 +786,22 @@ with tab_prof:
             else:
                 col_of = {"Pace": "pace_min_mi", "Speed": "speed_mph", "Heart rate": "heart_rate"}
                 metric = st.radio("Show on the chart", list(col_of), horizontal=True, key="profile_metric")
+                with st.expander("Stop detection (advanced)"):
+                    st.slider("Shortest break to count (minutes)", 1, 10, DEFAULT_MIN_STOP_S // 60, key="stop_min_min",
+                                             help="A slow or still stretch shorter than this counts as moving. Changing it re-computes stopped time "
+                                                  "for every hike, in every tab.")
+                    st.slider("Heart-rate drop that proves a rest (standard deviations)", 0.0, 6.0, float(DEFAULT_HR_DROP_SD), 0.25,
+                                        key="hr_drop",
+                                        help="Each hike is judged against itself: the app measures how much YOUR heart rate normally varies "
+                                             "while you move on that hike (one standard deviation, often 10-15 bpm). A slow stretch only counts as a "
+                                             "break if your heart rate fell at least this many standard deviations below where it was while moving, "
+                                             "or the watch timer paused, or you stood inside a tight 5 m circle for a minute or more (see below). "
+                                             "Other slow stretches are shown as 'slow technical' and counted as moving. Higher = fewer breaks. "
+                                             "0 = ignore heart rate.")
+                    st.caption("How slow is measured: your speed over a **1 minute** moving window. If you are slow on the ground but climbing or "
+                               "dropping quickly (about 950 ft/hr or more), that is effort, not a pause. If your GPS points sit inside a tight "
+                               "**5 m circle** (DBSCAN clustering) for a minute or more, that is a stationary rest break. GPS is used only in memory "
+                               "while a file is read to find those clusters; no coordinate is saved, shown or sent anywhere.")
                 if not pf[col_of[metric]].notna().any():
                     st.info(f"This hike's saved profile has no {metric.lower()} data (saved by an older version). Re-upload its .zip "
                             "to add it. Showing heart rate instead.")
@@ -843,6 +846,15 @@ with tab_prof:
                 fig.update_xaxes(title_text="Miles from start")
                 fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400, legend=dict(orientation="h", y=1.12))
                 plot(fig)
+                st.caption("A stop is a break: a stretch at or above the shortest-break setting (above, default 1 minute) where you made "
+                           "almost no progress (under about 40% of your typical moving speed on that hike, over a 1 minute moving window; climbing counts "
+                           "as progress, 1 m up is worth about 8 m of flat ground, and climbing or dropping at 950+ ft/hr overrides a pause, so a slow scramble isn't "
+                           "mistaken for standing still; the watch's own speed reading drops to zero too often to trust) AND either the "
+                           "watch's timer paused, you stayed inside a tight 5 m circle (a DBSCAN cluster of your GPS points, used in memory only) or your heart rate fell by the chosen number of standard deviations (measured on that hike's own "
+                           "minute-to-minute heart-rate variation). Slow stretches where it stayed up, like ice or rock, are 'slow technical' "
+                           "time and count as moving. Grade is measured over about 100 m of trail from smoothed barometric "
+                           "altitude, so short scrambles are averaged out. Peak predictions use distance and total climb because "
+                           "the reference routes don't include steepness data yet.")
                 r = withp.loc[pick]
                 biggest = pf.loc[pf["stop_min"].idxmax()]
                 slow_hr = r.get("slow_technical_hr")
@@ -929,15 +941,7 @@ with tab_prof:
             f2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=330, title="Do you stop more on longer days?",
                              legend_title_text="", legend=dict(orientation="h", y=-0.25))
             plot(f2)
-        st.caption("A stop is a break: a stretch at or above the shortest-break setting (above, default 1 minute) where you made "
-                   "almost no progress (under about 40% of your typical moving speed on that hike, over a 1 minute moving window; climbing counts "
-                   "as progress, 1 m up is worth about 8 m of flat ground, and climbing or dropping at 950+ ft/hr overrides a pause, so a slow scramble isn't "
-                   "mistaken for standing still; the watch's own speed reading drops to zero too often to trust) AND either the "
-                   "watch's timer paused, you stayed inside a tight 5 m circle (a DBSCAN cluster of your GPS points, used in memory only) or your heart rate fell by the chosen number of standard deviations (measured on that hike's own "
-                   "minute-to-minute heart-rate variation). Slow stretches where it stayed up, like ice or rock, are 'slow technical' "
-                   "time and count as moving. Grade is measured over about 100 m of trail from smoothed barometric "
-                   "altitude, so short scrambles are averaged out. Peak predictions use distance and total climb because "
-                   "the reference routes don't include steepness data yet.")
+
 
 # ============================================================ TAB 3
 with tab3:
